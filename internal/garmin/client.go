@@ -5,10 +5,11 @@
 // It is built from the committed copy of Garmin's public Personal API
 // description (docs/garmin/). Where that description is silent, it uses a safe
 // default, documented in the README:
-//   - the token response is read from the "access_token" field (the FAQ only
-//     says "an access token");
-//   - the token is sent as "Authorization: Bearer *** (the FAQ says the APIs
-//     use OAuth2 access tokens);
+//   - the token response is the token itself as a plain-text body (the FAQ only
+//     says "an access token", and the real endpoint returns text/plain, not
+//     JSON);
+//   - the token is sent as "Authorization: Bearer <token>" (the FAQ says the
+//     APIs use OAuth2 access tokens);
 //   - a downloaded file comes back as a ZIP (application/x-zip-compressed), so
 //     the single .fit inside is taken.
 package garmin
@@ -43,14 +44,6 @@ func New(key string) *Client {
 // SetBaseURL overrides the host; used by tests to point at the fake server.
 func (c *Client) SetBaseURL(u string) { c.baseURL = strings.TrimRight(u, "/") }
 
-// tokenResponse is the shape of the token endpoint's body. The OpenAPI file
-// does not document it; "access_token" is the documented OAuth2 field name.
-type tokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-}
-
 // AccessToken is a Garmin access token.
 type AccessToken struct {
 	token   string
@@ -60,14 +53,16 @@ type AccessToken struct {
 // Valid reports whether the token is still fresh (a minute's grace).
 func (t AccessToken) Valid() bool { return time.Now().Before(t.expires.Add(-time.Minute)) }
 
-// Authorize exchanges the key for an access token.
+// Authorize exchanges the key for an access token. Garmin's Personal API token
+// endpoint returns the token as a plain-text body (text/plain), not JSON: the
+// ~1.1KB response is the token itself, used as the Bearer for 24h.
 func (c *Client) Authorize(ctx context.Context) (AccessToken, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/personalalapitoken-service/personal-api/personal-api-key/token", nil)
+		c.baseURL+"/personalapitoken-service/personal-api/personal-api-key/token", nil)
 	if err != nil {
 		return AccessToken{}, err
 	}
-	req.Header.Set("Authorization", "ApiKey ***"+c.key)
+	req.Header.Set("Authorization", "ApiKey "+c.key)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return AccessToken{}, fmt.Errorf("requesting token: %w", err)
@@ -76,18 +71,15 @@ func (c *Client) Authorize(ctx context.Context) (AccessToken, error) {
 	if resp.StatusCode != http.StatusOK {
 		return AccessToken{}, fmt.Errorf("garmin: token endpoint returned %s", resp.Status)
 	}
-	var tr tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
-		return AccessToken{}, fmt.Errorf("decoding token response: %w", err)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return AccessToken{}, fmt.Errorf("reading token response: %w", err)
 	}
-	if tr.AccessToken == "" {
-		return AccessToken{}, fmt.Errorf("garmin: token response had no access_token")
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return AccessToken{}, fmt.Errorf("garmin: token response was empty")
 	}
-	expires := time.Now().Add(24 * time.Hour)
-	if tr.ExpiresIn > 0 {
-		expires = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	}
-	return AccessToken{token: tr.AccessToken, expires: expires}, nil
+	return AccessToken{token: token, expires: time.Now().Add(24 * time.Hour)}, nil
 }
 
 // activity is the minimal shape of a SummarizedActivityDTO we need.
