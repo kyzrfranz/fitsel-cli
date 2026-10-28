@@ -1,0 +1,56 @@
+# The first CI of a new repo, from the charter (ADR 0045): replace or extend it by pull request.
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: desk
+    steps:
+      - name: Checkout repository
+        run: |
+          set -euo pipefail
+          token="${{ forgejo.token }}"
+          # server_url already carries the scheme (e.g. https://office-local…ts.net),
+          # so strip it before building the host to avoid a doubled scheme
+          # (https://https://…) that makes git clone fail at checkout.
+          server_url="${{ forgejo.server_url }}"
+          host="${server_url#https://}"
+          host="${host#http://}"
+          repo="${{ forgejo.repository }}"
+          if [ -n "$token" ]; then
+            url="https://x-access-token:${token}@${host}/${repo}.git"
+          else
+            url="https://${host}/${repo}"
+          fi
+          git clone "$url" .
+          # The clone is on main: test the commit this run is for, the pushed commit or the pull request's head.
+          git checkout --detach "${{ forgejo.sha }}"
+      - name: shellcheck *.sh (bash -n fallback)
+        run: |
+          set -euo pipefail
+          files="$(git ls-files '*.sh')"
+          if [ -z "$files" ]; then
+            echo "no shell scripts tracked; nothing to check"
+            exit 0
+          fi
+          if command -v shellcheck >/dev/null 2>&1; then
+            rc=0
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              echo "shellcheck: $f"
+              if ! shellcheck "$f"; then rc=1; fi
+            done <<< "$files"
+            if [ "$rc" -ne 0 ]; then
+              echo "shellcheck reported findings above." >&2
+              exit 1
+            fi
+            echo "shellcheck clean."
+            exit 0
+          fi
+          echo "shellcheck not found on desk runner; falling back to bash -n" >&2
+          rc=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if ! bash -n "$f"; then echo "syntax error: $f" >&2; rc=1; fi
+          done <<< "$files"
+          exit $rc
