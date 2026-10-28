@@ -35,11 +35,16 @@ const BaseURL = "https://personal.connectapi.garmin.com"
 // new one. Callers branch on it with errors.Is.
 var ErrBadKey = errors.New("garmin: invalid API key")
 
-// Client talks to Garmin's Personal API.
+// Client talks to Garmin's Personal API. It owns its access token: once
+// Authorize has succeeded, List and Download refresh it transparently when it
+// expires or Garmin rejects it (a 401), so a token expiring mid-run does not
+// stop the run — the client just asks for a new one.
 type Client struct {
 	baseURL string
 	key     string
 	http    *http.Client
+
+	token AccessToken // set by Authorize; refreshed by bearer()
 }
 
 // New returns a client for the athlete's key.
@@ -59,10 +64,37 @@ type AccessToken struct {
 // Valid reports whether the token is still fresh (a minute's grace).
 func (t AccessToken) Valid() bool { return time.Now().Before(t.expires.Add(-time.Minute)) }
 
-// Authorize exchanges the key for an access token. Garmin's Personal API token
-// endpoint returns the token as a plain-text body (text/plain), not JSON: the
-// ~1.1KB response is the token itself, used as the Bearer for 24h.
+// Authorize exchanges the key for an access token and stores it in the client,
+// so subsequent calls refresh it themselves instead of taking it as an arg.
+// Garmin's Personal API token endpoint returns the token as a plain-text body
+// (text/plain), not JSON: the ~1.1KB response is the token itself, used as the
+// Bearer for 24h.
 func (c *Client) Authorize(ctx context.Context) (AccessToken, error) {
+	tok, err := c.refresh(ctx)
+	if err != nil {
+		return AccessToken{}, err
+	}
+	c.token = tok
+	return tok, nil
+}
+
+// bearer returns a valid access token, refreshing it if it has expired or
+// Garmin has rejected the last one (a 401). A refresh that itself 401s means
+// the key is bad, not the token, so it surfaces as ErrBadKey.
+func (c *Client) bearer(ctx context.Context) (AccessToken, error) {
+	if c.token.Valid() {
+		return c.token, nil
+	}
+	tok, err := c.refresh(ctx)
+	if err != nil {
+		return AccessToken{}, err
+	}
+	c.token = tok
+	return tok, nil
+}
+
+// refresh hits the token endpoint and stores the new token in the client.
+func (c *Client) refresh(ctx context.Context) (AccessToken, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.baseURL+"/personalapitoken-service/personal-api/personal-api-key/token", nil)
 	if err != nil {
@@ -106,7 +138,7 @@ type Activity struct {
 }
 
 // List returns activities at or after startDate (YYYY-MM-DD), newest first.
-func (c *Client) List(ctx context.Context, token AccessToken, startDate string) ([]Activity, error) {
+func (c *Client) List(ctx context.Context, startDate string) ([]Activity, error) {
 	q := url.Values{}
 	q.Set("start", "0")
 	q.Set("limit", "100")
@@ -114,21 +146,13 @@ func (c *Client) List(ctx context.Context, token AccessToken, startDate string) 
 	q.Set("sortBy", "beginTimestamp")
 	q.Set("sortOrder", "desc")
 	u := fmt.Sprintf("%s/activitylist-service/activities/search/activities?%s", c.baseURL, q.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	body, err := c.get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token.token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("garmin: list returned %s", resp.Status)
-	}
+	defer body.Close()
 	var acts []activity
-	if err := json.NewDecoder(resp.Body).Decode(&acts); err != nil {
+	if err := json.NewDecoder(body).Decode(&acts); err != nil {
 		return nil, fmt.Errorf("decoding activities: %w", err)
 	}
 	out := make([]Activity, 0, len(acts))
@@ -140,24 +164,57 @@ func (c *Client) List(ctx context.Context, token AccessToken, startDate string) 
 	return out, nil
 }
 
-// Download fetches an activity's file and returns the FIT bytes inside the
-// ZIP archive Garmin returns.
-func (c *Client) Download(ctx context.Context, token AccessToken, id int64) ([]byte, error) {
-	u := fmt.Sprintf("%s/download-service/files/activity/%d", c.baseURL, id)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+// get performs a GET and returns the response body (caller closes it),
+// refreshing the token once if Garmin rejects it (a 401). A 401 on a protected
+// endpoint means the token is bad, not the request, so bearer() refreshes it
+// once and the request is retried; if that also 401s, bearer() returns
+// ErrBadKey.
+func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token.token)
+	tok, err := c.bearer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.token)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("downloading activity %d: %w", id, err)
+		return nil, fmt.Errorf("listing activities: %w", err)
 	}
-	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		// The token was rejected: force a refresh (do not go through bearer(),
+		// which would return the still-valid-but-rejected token) and retry.
+		resp.Body.Close()
+		tok, err := c.refresh(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.token = tok
+		req.Header.Set("Authorization", "Bearer "+tok.token)
+		resp, err = c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("listing activities: %w", err)
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("garmin: download of %d returned %s", id, resp.Status)
+		resp.Body.Close()
+		return nil, fmt.Errorf("garmin: request returned %s", resp.Status)
 	}
-	raw, err := io.ReadAll(resp.Body)
+	return resp.Body, nil
+}
+
+// Download fetches an activity's file and returns the FIT bytes inside the
+// ZIP archive Garmin returns.
+func (c *Client) Download(ctx context.Context, id int64) ([]byte, error) {
+	u := fmt.Sprintf("%s/download-service/files/activity/%d", c.baseURL, id)
+	body, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
 	}

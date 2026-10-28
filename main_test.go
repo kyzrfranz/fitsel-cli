@@ -229,3 +229,38 @@ func TestErrorPrintedOnStderr(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d (general)", calledWith, exitGeneral)
 	}
 }
+
+// TestRefreshMidRunUploadsEverything is step 2's end-to-end check (per #84): a
+// run whose token is already expired when it starts refreshes it transparently
+// and uploads every pending activity, requesting a new token instead of
+// stopping. The fake's ExpiredOnce makes the first token stale, so the run's
+// first List call must refresh it.
+func TestRefreshMidRunUploadsEverything(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	gar.ExpiredOnce = true // the token Authorize issues is already expired
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("expected 3 uploads, got %d", len(fits.Uploadees))
+	}
+	// The run requested a new token (the first was expired), so the fake issued
+	// two: proving it refreshed instead of stopping.
+	if gar.Tokens != 2 {
+		t.Fatalf("tokens issued = %d, want 2 (the run refreshed the expired token)", gar.Tokens)
+	}
+}
