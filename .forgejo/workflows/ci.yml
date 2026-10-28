@@ -103,7 +103,12 @@ jobs:
           else
             url="https://${host}/${repo}"
           fi
-          git clone "$url" .
+          # Clone into a fresh temp dir and move it in: the runner's working
+          # directory is not guaranteed empty, and `git clone .` fails with
+          # exit 128 if it isn't (this is what made the build job fail at 0s).
+          git clone "$url" .build
+          mv .build/* .build/.[!.]* . 2>/dev/null || true
+          rmdir .build 2>/dev/null || true
           # The clone is on main: build the commit this run is for (push to main).
           git checkout --detach "${{ forgejo.sha }}"
       - name: Cross-compile for ${{ matrix.os }} ${{ matrix.arch }}
