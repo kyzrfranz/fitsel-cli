@@ -90,3 +90,64 @@ func TestDryRunUploadsNothing(t *testing.T) {
 		t.Fatalf("dry-run marked activities synced; expected none")
 	}
 }
+
+// TestResumeAfterInterruptedSync is the task's own check (the reason this story
+// exists): a run over several activities, killed after the first few, completes
+// on rerun with no errors and every activity present exactly once. Here the
+// kill is an error boundary — the first run stops on an upload error after the
+// first upload is accepted and marked done — rather than a real signal.
+func TestResumeAfterInterruptedSync(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.FailOnce = true // kill the run on the second activity's upload
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{
+		"-since", "2026-10-01",
+		"-state", statePath,
+		"-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token",
+	}
+
+	// First run: 1001 uploads (202, marked done, saved), then 1002's upload
+	// fails and the run stops with an error — the "kill".
+	if err := run(args); err == nil {
+		t.Fatal("first run: expected an upload error, got nil")
+	}
+
+	// A clean rerun finishes the rest.
+	if err := run(args); err != nil {
+		t.Fatalf("resume run: %v", err)
+	}
+
+	// Every activity uploaded exactly once — fitsel dedupes by content, so a
+	// resend would show a second upload of the same bytes.
+	for _, id := range []string{"1001", "1002", "1003"} {
+		if got := fits.Count([]byte("FIT-DATA-" + id)); got != 1 {
+			t.Fatalf("activity %s uploaded %d times; want exactly once", id, got)
+		}
+	}
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("expected 3 uploads total, got %d", len(fits.Uploadees))
+	}
+
+	// State persisted across the two runs: all three are marked synced.
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	for _, id := range []string{"1001", "1002", "1003"} {
+		if !st.Done(id) {
+			t.Fatalf("activity %s not marked synced after resume", id)
+		}
+	}
+}

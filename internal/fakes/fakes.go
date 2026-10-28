@@ -131,7 +131,11 @@ type FakeFitsel struct {
 	Passkey   string
 	Uploadees [][]byte
 	Counts    map[string]int
-	mu        sync.Mutex
+	// FailOnce makes the next single upload return 500, so a caller sees an
+	// upload error and stops — a light way to simulate a run killed mid-way
+	// without a real signal. Cleared after it fires once.
+	FailOnce bool
+	mu       sync.Mutex
 }
 
 // NewFakeFitsel returns a fake that checks the multipart body and HMAC.
@@ -157,6 +161,17 @@ func (f *FakeFitsel) Count(fit []byte) int {
 }
 
 func (f *FakeFitsel) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// Fail once, if asked: the caller sees an upload error and stops, which
+	// resumes on the next run. Cleared under the same lock that guards Counts
+	// so the first run's accepted uploads and its failed upload are ordered.
+	f.mu.Lock()
+	failed := f.FailOnce
+	f.FailOnce = false
+	f.mu.Unlock()
+	if failed {
+		http.Error(w, "simulated failure", http.StatusInternalServerError)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
