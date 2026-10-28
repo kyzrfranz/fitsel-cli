@@ -59,3 +59,38 @@ A run stops with one of these codes so an athlete (or a cron) can act on it:
 | 8 | fitsel would not accept the upload (server error 500 or no network); the tool tried a few times, then stopped. | Wait a moment, then run again — nothing was marked synced, so the pending activity will be retried. |
 
 More codes are added as features land (uploads). This list grows with them.
+
+## Releases
+
+A binary for every supported platform is produced automatically on every merge
+to `main`, as this repo's CI (`.forgejo/workflows/ci.yml`). Each merge
+cross-compiles all four targets and pushes them to the `release-binaries`
+branch, untagged, ready to go:
+
+| File | Platform |
+|---|---|
+| `garmin-sync-darwin-arm64` | macOS, Apple Silicon (M1/M2/M3/M4) |
+| `garmin-sync-linux-amd64` | Linux, 64-bit x86 |
+| `garmin-sync-linux-arm64` | Linux, 64-bit ARM (e.g. Raspberry Pi) |
+| `garmin-sync-windows-amd64.exe` | Windows, 64-bit x86 |
+
+To get one: check out the `release-binaries` branch, take the file for your
+platform, rename it `garmin-sync` (drop the platform suffix, and the `.exe` on
+Windows), make it executable (`chmod +x garmin-sync` on Linux/macOS), and run
+it as under "Run".
+
+The binaries are cross-compiled from a single Go source tree with the standard
+library cross-compiler (`CGO_ENABLED=0 GOOS=… GOARCH=… go build`), so there is
+no third-party toolchain to install.
+
+Build one yourself, to test without merging, from a checkout of `main`:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o garmin-sync-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o garmin-sync-linux-arm64 .
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o garmin-sync-darwin-arm64 .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o garmin-sync-windows-amd64.exe .
+```
+
+The founder chooses the licence and tags/publishes v1 from these staged binaries;
+CI never creates a git tag or a release.

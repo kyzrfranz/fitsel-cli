@@ -64,3 +64,69 @@ jobs:
           go build ./...
           go vet ./...
           go test ./...
+  build:
+    # Cross-compile the release binaries for every supported platform,
+    # on every merge to main (ADR 0067). Publishes them as CI artifacts,
+    # untagged, so the founder can tag and publish v1.
+    if: github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: desk
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            out: garmin-sync
+          - os: linux
+            arch: amd64
+            out: garmin-sync-linux-amd64
+          - os: linux
+            arch: arm64
+            out: garmin-sync-linux-arm64
+          - os: windows
+            arch: amd64
+            out: garmin-sync-windows-amd64.exe
+    steps:
+      - name: Checkout repository
+        run: |
+          set -euo pipefail
+          token="${{ forgejo.token }}"
+          # server_url already carries the scheme (e.g. https://office-local…ts.net),
+          # so strip it before building the host to avoid a doubled scheme
+          # (https://https://…) that makes git clone fail at checkout.
+          server_url="${{ forgejo.server_url }}"
+          host="${server_url#https://}"
+          host="${host#http://}"
+          repo="${{ forgejo.repository }}"
+          if [ -n "$token" ]; then
+            url="https://x-access-token:${token}@${host}/braintrust/${repo}.git"
+          else
+            url="https://${host}/${repo}"
+          fi
+          git clone "$url" .
+          # The clone is on main: build the commit this run is for (push to main).
+          git checkout --detach "${{ forgejo.sha }}"
+      - name: Cross-compile for ${{ matrix.os }} ${{ matrix.arch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # No network: the standard library cross-compiler needs no downloads.
+          export GOPROXY=off
+          go build -o ${{ matrix.out }} .
+          ls -la ${{ matrix.out }}
+      - name: Stage the binary for release
+        run: |
+          set -euo pipefail
+          # The desk runner's CI is custom and cannot be relied on to support
+          # actions/upload-artifact, so the built binary is pushed to the
+          # release-binaries branch for the founder to download (see README).
+          mkdir -p release-binaries
+          cp "${{ matrix.out }}" "release-binaries/${{ matrix.out }}"
+          ls -la release-binaries
+          git add release-binaries
+          git -c user.name=developer -c user.email=developer@braintrust.internal \
+            commit -m "Release binary for ${{ matrix.os }} ${{ matrix.arch }}" || true
+          git push origin "release-binaries:release-binaries"
