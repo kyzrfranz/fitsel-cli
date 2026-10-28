@@ -72,6 +72,13 @@ func configPath() string {
 	return filepath.Join(home, ".config", "garmin-sync", "config.json")
 }
 
+// Path returns the location of the config file, so a caller can tell the
+// athlete where the credentials were saved. It honors $FITSEL_CONFIG and,
+// unset, the home-dir default.
+func Path() string {
+	return configPath()
+}
+
 // writeDefaults creates the config file with mode 0600 if it does not exist,
 // so the athlete knows where to put secrets they are missing. It never writes
 // a secret value; the athlete edits the file by hand.
@@ -107,6 +114,30 @@ func loadFromFile() (Credentials, error) {
 		return Credentials{}, fmt.Errorf("%w: %s: not valid JSON: %v", ErrConfigUnreadable, configPath(), err)
 	}
 	return c, nil
+}
+
+// Save writes all three secrets to the home-dir config, the same file Load
+// reads, so an interactive setup can store them without the athlete editing
+// JSON by hand. It reuses configPath() and the Credentials fields exactly:
+// no new store, no new format. The directory is created at 0700 and the file
+// at 0600, matching the existing default. It never touches the environment.
+func (c Credentials) Save() error {
+	dir := filepath.Dir(configPath())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := configPath()
+	return os.WriteFile(path, c.marshal(), 0o600)
+}
+
+// marshal renders the credentials as indented JSON with the existing keys,
+// so a file written by Save is read back by Load unchanged.
+func (c Credentials) marshal() []byte {
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return append(b, '\n')
 }
 
 // envOr returns the value of the environment variable, or fallback if it is
