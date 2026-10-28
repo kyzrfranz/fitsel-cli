@@ -169,11 +169,41 @@ type Activity struct {
 	StartGMT string
 }
 
-// List returns activities at or after startDate (YYYY-MM-DD), newest first.
+// pageSize is the page size the list endpoint returns per request. Garmin's
+// Personal API caps the activities list at 100 per request (the historical
+// default), so anything past the first page must be requested by offset: the
+// only way to reach an athlete's activities past the first 100 since --since.
+const pageSize = 100
+
+// List returns activities at or after startDate (YYYY-MM-DD), newest first. It
+// walks every page the endpoint returns, so an athlete with more than pageSize
+// activities since startDate is not silently truncated at the first 100: each
+// page is requested at the running offset and appended, until a page returns
+// fewer than pageSize activities (the last one).
 func (c *Client) List(ctx context.Context, startDate string) ([]Activity, error) {
+	out := make([]Activity, 0)
+	for start := 0; ; start += pageSize {
+		page, err := c.listPage(ctx, startDate, start)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		// Stop after a short page (the last) or an empty one: a full page of
+		// pageSize may be the last, so do not assume there is another — the
+		// next request returning nothing ends the loop.
+		if len(page) < pageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+// listPage fetches one page of activities starting at offset start, newest
+// first, returning just that page's activities.
+func (c *Client) listPage(ctx context.Context, startDate string, start int) ([]Activity, error) {
 	q := url.Values{}
-	q.Set("start", "0")
-	q.Set("limit", "100")
+	q.Set("start", strconv.Itoa(start))
+	q.Set("limit", strconv.Itoa(pageSize))
 	q.Set("startDate", startDate)
 	q.Set("sortBy", "beginTimestamp")
 	q.Set("sortOrder", "desc")
