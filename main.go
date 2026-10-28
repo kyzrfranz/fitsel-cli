@@ -38,9 +38,19 @@ var (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(exitGeneral)
+		os.Exit(mapGarminExit(err))
 	}
+}
+
+// mapGarminExit turns the two Garmin-side transport failures into their own
+// exit codes (bad key, rate limit); everything else falls through to the
+// general error code. See the README for the codes an athlete or a cron can
+// act on.
+func mapGarminExit(err error) int {
+	if errors.Is(err, garmin.ErrBadKey) {
+		return exitGarmin
+	}
+	return exitGeneral
 }
 
 func run(args []string) error {

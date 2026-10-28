@@ -2,10 +2,10 @@ package garmin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"garmin-sync/internal/fakes"
@@ -130,9 +130,42 @@ func TestAuthorizeRejectsWrongHeader(t *testing.T) {
 	// old "ApiKey ***secret-key" must reject this.
 	_, err := c.Authorize(context.Background())
 	if err == nil {
-		t.Fatal("expected 401 for the corrected header against a server expecting the old one")
+		t.Fatal("expected a 401 for the corrected header against a server expecting the old one")
 	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Fatalf("want a 401 error, got %v", err)
+	// Per #84 a rejected key surfaces as ErrBadKey, not a raw status string.
+	if !errors.Is(err, ErrBadKey) {
+		t.Fatalf("expected errors.Is(err, ErrBadKey), got %v", err)
+	}
+}
+
+// TestAuthorizeBadKeyWrapsErrBadKey proves a 401 at the token endpoint surfaces
+// as garmin.ErrBadKey, so main can give a bad key its own exit code (per #84).
+func TestAuthorizeBadKeyWrapsErrBadKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad key", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	_, err := c.Authorize(context.Background())
+	if !errors.Is(err, ErrBadKey) {
+		t.Fatalf("expected errors.Is(err, ErrBadKey), got %v", err)
+	}
+}
+
+// TestAuthorizeNon401DoesNotWrapErrBadKey proves only a 401 is a bad key: a
+// different transport failure (500) must not masquerade as one.
+func TestAuthorizeNon401DoesNotWrapErrBadKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	_, err := c.Authorize(context.Background())
+	if errors.Is(err, ErrBadKey) {
+		t.Fatal("500 must not be treated as a bad key")
 	}
 }
