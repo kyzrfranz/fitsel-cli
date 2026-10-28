@@ -51,7 +51,7 @@ func NewActivities() []FakeActivity {
 func NewFakeGarmin(key string, activities []FakeActivity) *FakeGarmin {
 	f := &FakeGarmin{Key: key, activities: activities}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/personalalapitoken-service/personal-api/personal-api-key/token", f.handleToken)
+	mux.HandleFunc("/personalapitoken-service/personal-api/personal-api-key/token", f.handleToken)
 	mux.HandleFunc("/activitylist-service/activities/search/activities", f.handleList)
 	mux.HandleFunc("/download-service/files/activity/", f.handleDownload)
 	f.Server = httptest.NewServer(mux)
@@ -65,18 +65,18 @@ func (f *FakeGarmin) URL() string { return f.Server.URL }
 func (f *FakeGarmin) Close() { f.Server.Close() }
 
 func (f *FakeGarmin) handleToken(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Authorization") != "ApiKey ***"+f.Key {
+	if r.Header.Get("Authorization") != "ApiKey "+f.Key {
 		http.Error(w, "bad key", http.StatusUnauthorized)
 		return
 	}
 	f.mu.Lock()
 	f.Tokens++
 	f.mu.Unlock()
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"access_token": fmt.Sprintf("fake-token-%d", f.Tokens),
-		"token_type":   "bearer",
-		"expires_in":   86400,
-	})
+	// The real Personal API token endpoint returns the token as a plain-text
+	// body (text/plain), not JSON: serve it the same way so the client's
+	// plain-text reader is what the tests exercise.
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprint(w, "fake-token-"+fmt.Sprint(f.Tokens))
 }
 
 func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
