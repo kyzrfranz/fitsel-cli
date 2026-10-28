@@ -29,6 +29,11 @@ const (
 	exitUpload      = 4
 	exitRateLimited = 5
 	exitGeneral     = 1
+
+	// fitsel upload errors (each its own code, per #85)
+	exitBadSignature    = 6
+	exitWebhookMissing  = 7
+	exitUploadExhausted = 8
 )
 
 // test hooks: overridden by tests to point at the fake servers.
@@ -51,16 +56,24 @@ func exitError(err error, exit func(int)) {
 	exit(mapGarminExit(err))
 }
 
-// mapGarminExit turns the two Garmin-side transport failures into their own
-// exit codes (bad key, rate limit); everything else falls through to the
-// general error code. See the README for the codes an athlete or a cron can
-// act on.
+// mapGarminExit turns the transport failures into their own exit codes so an
+// athlete (or a cron) can act on them (see the README). It handles both the
+// Garmin-side failures and the fitsel upload failures; everything else falls
+// through to the general error code.
 func mapGarminExit(err error) int {
 	switch {
 	case errors.Is(err, garmin.ErrBadKey):
 		return exitGarmin
 	case errors.Is(err, garmin.ErrRateLimited):
 		return exitRateLimited
+	case errors.Is(err, fitsel.ErrUploadExhausted):
+		return exitUploadExhausted
+	case errors.Is(err, fitsel.ErrBadSignature):
+		return exitBadSignature
+	case errors.Is(err, fitsel.ErrNotFound):
+		return exitWebhookMissing
+	case errors.Is(err, fitsel.ErrBadRequest):
+		return exitUpload
 	default:
 		return exitGeneral
 	}
@@ -139,9 +152,7 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("uploading %s: %w", itoa(a.ID), err)
 		}
-		if !accepted {
-			return fmt.Errorf("uploading %s: fitsel did not accept it", itoa(a.ID))
-		}
+		_ = accepted // Upload returns nil only on 202; a nil error means success.
 		st.MarkDone(itoa(a.ID))
 		if err := st.Save(); err != nil {
 			return fmt.Errorf("saving state: %w", err)

@@ -215,6 +215,12 @@ type FakeFitsel struct {
 	// upload error and stops — a light way to simulate a run killed mid-way
 	// without a real signal. Cleared after it fires once.
 	FailOnce bool
+
+	// Statuses is a queue of HTTP statuses consumed one per upload, so a test
+	// can script a sequence — e.g. 500, 500, 202 for the retry path, or a
+	// single 404. When empty (the default) every upload returns 202. Consumed
+	// under mu alongside FailOnce and Counts.
+	Statuses []int
 	mu       sync.Mutex
 }
 
@@ -241,16 +247,24 @@ func (f *FakeFitsel) Count(fit []byte) int {
 }
 
 func (f *FakeFitsel) handleIngest(w http.ResponseWriter, r *http.Request) {
-	// Fail once, if asked: the caller sees an upload error and stops, which
-	// resumes on the next run. Cleared under the same lock that guards Counts
-	// so the first run's accepted uploads and its failed upload are ordered.
+	// Decide this upload's fate up front, under one lock so it is ordered
+	// against FailOnce and Counts. FailOnce still wins (a run killed mid-way):
+	// the existing resume test relies on it.
 	f.mu.Lock()
-	failed := f.FailOnce
-	f.FailOnce = false
-	f.mu.Unlock()
-	if failed {
+	switch {
+	case f.FailOnce:
+		f.FailOnce = false
+		f.mu.Unlock()
 		http.Error(w, "simulated failure", http.StatusInternalServerError)
 		return
+	case len(f.Statuses) > 0:
+		status := f.Statuses[0]
+		f.Statuses = f.Statuses[1:]
+		f.mu.Unlock()
+		http.Error(w, "scripted failure", status)
+		return
+	default:
+		f.mu.Unlock()
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
