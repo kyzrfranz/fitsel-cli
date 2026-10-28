@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"garmin-sync/internal/fakes"
 )
@@ -25,7 +26,7 @@ func TestAuthorizeAndList(t *testing.T) {
 		t.Fatal("expected a valid token")
 	}
 
-	acts, err := c.List(context.Background(), tok, "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -42,11 +43,10 @@ func TestListEmpty(t *testing.T) {
 	defer g.Close()
 	c := New("test-garmin-key")
 	c.SetBaseURL(g.URL())
-	tok, err := c.Authorize(context.Background())
-	if err != nil {
+	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	acts, err := c.List(context.Background(), tok, "2027-01-01")
+	acts, err := c.List(context.Background(), "2027-01-01")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -60,11 +60,10 @@ func TestDownloadUnwrapsZip(t *testing.T) {
 	defer g.Close()
 	c := New("test-garmin-key")
 	c.SetBaseURL(g.URL())
-	tok, err := c.Authorize(context.Background())
-	if err != nil {
+	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	fit, err := c.Download(context.Background(), tok, 1001)
+	fit, err := c.Download(context.Background(), 1001)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -167,5 +166,77 @@ func TestAuthorizeNon401DoesNotWrapErrBadKey(t *testing.T) {
 	_, err := c.Authorize(context.Background())
 	if errors.Is(err, ErrBadKey) {
 		t.Fatal("500 must not be treated as a bad key")
+	}
+}
+
+// TestRefreshOnExpiry proves the client asks for a new token when the old one
+// has expired, instead of stopping: a token that is already past its expiry is
+// refreshed transparently and the run continues.
+func TestRefreshOnExpiry(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+
+	// Authorize once (fresh), then force it stale so the next List refreshes.
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	c.token.expires = time.Now().Add(-time.Hour) // expired
+
+	acts, err := c.List(context.Background(), "2026-10-01")
+	if err != nil {
+		t.Fatalf("list after expiry: %v", err)
+	}
+	if len(acts) != 3 {
+		t.Fatalf("expected 3 activities after refresh, got %d", len(acts))
+	}
+	if g.Tokens != 2 {
+		t.Fatalf("tokens issued = %d, want 2 (a new token was requested)", g.Tokens)
+	}
+}
+
+// TestRefreshOn401 proves the client refreshes once when Garmin rejects the
+// token mid-run (a 401 on a protected endpoint), continuing after the new one
+// is accepted.
+func TestRefreshOn401(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	g.UnauthorizedOnce = true // the first protected call 401s, then recovers
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	acts, err := c.List(context.Background(), "2026-10-01")
+	if err != nil {
+		t.Fatalf("list after 401: %v", err)
+	}
+	if len(acts) != 3 {
+		t.Fatalf("expected 3 activities after refresh, got %d", len(acts))
+	}
+	if g.Tokens != 2 {
+		t.Fatalf("tokens issued = %d, want 2 (the 401 triggered a refresh)", g.Tokens)
+	}
+}
+
+// TestRefreshStill401IsBadKey proves a refresh that 401s again is a bad key,
+// not a transient token problem: the key itself is rejected.
+func TestRefreshStill401IsBadKey(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	g.RefreshFails = true // refresh also 401s
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	c.token.expires = time.Now().Add(-time.Hour) // force a refresh
+
+	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("expected ErrBadKey when the refresh itself 401s, got %v", err)
 	}
 }

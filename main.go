@@ -86,8 +86,7 @@ func run(args []string) error {
 	up := fitsel.New(*endpoint, creds.FitselPasskey)
 
 	ctx := context.Background()
-	token, err := gar.Authorize(ctx)
-	if err != nil {
+	if _, err := gar.Authorize(ctx); err != nil {
 		return fmt.Errorf("authenticating with Garmin: %w", err)
 	}
 
@@ -98,7 +97,7 @@ func run(args []string) error {
 		return errors.New("first run: pass --since YYYY-MM-DD to set the start date")
 	}
 
-	acts, err := gar.List(ctx, token, *since)
+	acts, err := gar.List(ctx, *since)
 	if err != nil {
 		return fmt.Errorf("listing activities: %w", err)
 	}
@@ -127,7 +126,7 @@ func run(args []string) error {
 
 	for _, a := range pending {
 		fmt.Printf("syncing %s (%s)...\n", a.Name, itoa(a.ID))
-		fit, err := gar.Download(ctx, token, a.ID)
+		fit, err := gar.Download(ctx, a.ID)
 		if err != nil {
 			return fmt.Errorf("downloading %s: %w", itoa(a.ID), err)
 		}

@@ -30,6 +30,21 @@ type FakeGarmin struct {
 	Downloads  int    // how many activity files have been downloaded
 	activities []FakeActivity
 	mu         sync.Mutex
+
+	// UnauthorizedOnce makes the next protected call (List or Download) return
+	// 401 once, then recover — a light way to exercise the client's refresh-on-
+	// 401 without a real expired token. Cleared after it fires once.
+	UnauthorizedOnce bool
+
+	// ExpiredOnce makes the first token issued already expired, so the next
+	// protected call must refresh it — exercises the refresh-on-expiry path
+	// end to end. Cleared after it fires once.
+	ExpiredOnce bool
+
+	// RefreshFails makes the token exchange fail (401) once, on the refresh
+	// triggered by a rejected/expired token — exercises the "re-auth still 401s
+	// is a bad key" path. Cleared after it fires once.
+	RefreshFails bool
 }
 
 // FakeActivity is one activity the fake Garmin serves.
@@ -72,15 +87,44 @@ func (f *FakeGarmin) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.Tokens++
+	expired := f.ExpiredOnce
+	f.ExpiredOnce = false
+	f.mu.Unlock()
+	// RefreshFails: the token exchange fails (401) once, on the refresh
+	// triggered by a rejected/expired token (i.e. the second token request),
+	// which the client surfaces as ErrBadKey (the key is bad, not the token).
+	f.mu.Lock()
+	if f.RefreshFails && f.Tokens > 1 {
+		f.RefreshFails = false
+		f.mu.Unlock()
+		http.Error(w, "bad key", http.StatusUnauthorized)
+		return
+	}
 	f.mu.Unlock()
 	// The real Personal API token endpoint returns the token as a plain-text
 	// body (text/plain), not JSON: serve it the same way so the client's
 	// plain-text reader is what the tests exercise.
 	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprint(w, "fake-token-"+fmt.Sprint(f.Tokens))
+	if expired {
+		// An already-expired token: the client must refresh it on the next
+		// protected call, which is what this exercises end to end.
+		fmt.Fprint(w, "expired-token-1")
+	} else {
+		fmt.Fprint(w, "fake-token-"+fmt.Sprint(f.Tokens))
+	}
 }
 
 func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
+	// UnauthorizedOnce: reject the first protected call once, then recover, so
+	// a client can exercise its refresh-on-401 path.
+	f.mu.Lock()
+	if f.UnauthorizedOnce {
+		f.UnauthorizedOnce = false
+		f.mu.Unlock()
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	f.mu.Unlock()
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer fake-token-") {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -100,6 +144,15 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *FakeGarmin) handleDownload(w http.ResponseWriter, r *http.Request) {
+	// UnauthorizedOnce: fail the next protected call once, then recover.
+	f.mu.Lock()
+	if f.UnauthorizedOnce {
+		f.UnauthorizedOnce = false
+		f.mu.Unlock()
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	f.mu.Unlock()
 	if !strings.HasPrefix(r.URL.Path, "/download-service/files/activity/") {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
