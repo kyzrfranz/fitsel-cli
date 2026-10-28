@@ -384,6 +384,9 @@ func TestInvalidUploadExitsFitselAndUploadsNothing(t *testing.T) {
 	if got := mapGarminExit(err); got != exitUpload {
 		t.Fatalf("exit code = %d, want %d (invalid upload)", got, exitUpload)
 	}
+	if !strings.Contains(err.Error(), "invalid upload") {
+		t.Fatalf("error = %q, want it to mention the invalid upload", err)
+	}
 	if len(fits.Uploadees) != 0 {
 		t.Fatalf("invalid upload uploaded %d files; expected none", len(fits.Uploadees))
 	}
