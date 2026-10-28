@@ -45,6 +45,11 @@ type FakeGarmin struct {
 	// triggered by a rejected/expired token — exercises the "re-auth still 401s
 	// is a bad key" path. Cleared after it fires once.
 	RefreshFails bool
+
+	// RateLimitOnce makes the next protected call (List or Download) return a
+	// 429 once, with a Retry-After header, so a client can exercise its
+	// rate-limit back-off path. Cleared after it fires once.
+	RateLimitOnce bool
 }
 
 // FakeActivity is one activity the fake Garmin serves.
@@ -115,9 +120,18 @@ func (f *FakeGarmin) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
-	// UnauthorizedOnce: reject the first protected call once, then recover, so
-	// a client can exercise its refresh-on-401 path.
+	// RateLimitOnce: fail the next protected call once with a 429 and a
+	// Retry-After header, so a client can exercise its rate-limit back-off.
+	// UnauthorizedOnce and RateLimitOnce share one lock so the first of them
+	// to fire wins and the second can still run.
 	f.mu.Lock()
+	if f.RateLimitOnce {
+		f.RateLimitOnce = false
+		f.mu.Unlock()
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
 	if f.UnauthorizedOnce {
 		f.UnauthorizedOnce = false
 		f.mu.Unlock()
@@ -144,8 +158,19 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *FakeGarmin) handleDownload(w http.ResponseWriter, r *http.Request) {
-	// UnauthorizedOnce: fail the next protected call once, then recover.
+	// RateLimitOnce: fail the next protected call once with a 429 and a
+	// Retry-After header, so a client can exercise its rate-limit back-off.
+	// UnauthorizedOnce and RateLimitOnce share one lock so the first of them
+	// to fire wins and the second can still run.
 	f.mu.Lock()
+	if f.RateLimitOnce {
+		f.RateLimitOnce = false
+		f.mu.Unlock()
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+	// UnauthorizedOnce: fail the next protected call once, then recover.
 	if f.UnauthorizedOnce {
 		f.UnauthorizedOnce = false
 		f.mu.Unlock()

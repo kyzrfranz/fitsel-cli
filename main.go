@@ -23,11 +23,12 @@ import (
 
 // exit codes
 const (
-	exitOK      = 0
-	exitConfig  = 2
-	exitGarmin  = 3
-	exitUpload  = 4
-	exitGeneral = 1
+	exitOK          = 0
+	exitConfig      = 2
+	exitGarmin      = 3
+	exitUpload      = 4
+	exitRateLimited = 5
+	exitGeneral     = 1
 )
 
 // test hooks: overridden by tests to point at the fake servers.
@@ -55,10 +56,14 @@ func exitError(err error, exit func(int)) {
 // general error code. See the README for the codes an athlete or a cron can
 // act on.
 func mapGarminExit(err error) int {
-	if errors.Is(err, garmin.ErrBadKey) {
+	switch {
+	case errors.Is(err, garmin.ErrBadKey):
 		return exitGarmin
+	case errors.Is(err, garmin.ErrRateLimited):
+		return exitRateLimited
+	default:
+		return exitGeneral
 	}
-	return exitGeneral
 }
 
 func run(args []string) error {

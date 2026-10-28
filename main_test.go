@@ -264,3 +264,39 @@ func TestRefreshMidRunUploadsEverything(t *testing.T) {
 		t.Fatalf("tokens issued = %d, want 2 (the run refreshed the expired token)", gar.Tokens)
 	}
 }
+
+// TestRateLimitExitsGarminAndUploadsNothing is step 3's end-to-end check (per
+// #84): a run whose first protected call is rate-limited (429) backs off for
+// Retry-After and stops cleanly with its own exit code, uploading nothing.
+func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	gar.RateLimitOnce = true // the first protected call (List) 429s, with Retry-After
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected a run error on a rate limit")
+	}
+	if got := mapGarminExit(err); got != exitRateLimited {
+		t.Fatalf("exit code = %d, want %d (rate limited)", got, exitRateLimited)
+	}
+	// The run stopped at List, before any download or upload: nothing transferred.
+	if gar.Downloads != 0 {
+		t.Fatalf("rate limit downloaded %d files; expected none", gar.Downloads)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("rate limit uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
