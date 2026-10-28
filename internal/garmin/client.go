@@ -17,6 +17,7 @@ package garmin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,11 @@ import (
 // BaseURL is the real Garmin Personal API host. Tests point the client at the
 // fake server instead.
 const BaseURL = "https://personal.connectapi.garmin.com"
+
+// ErrBadKey is returned when the Garmin key is rejected (401) at the token
+// endpoint: the key is invalid and will not work until the athlete creates a
+// new one. Callers branch on it with errors.Is.
+var ErrBadKey = errors.New("garmin: invalid API key")
 
 // Client talks to Garmin's Personal API.
 type Client struct {
@@ -69,6 +75,9 @@ func (c *Client) Authorize(ctx context.Context) (AccessToken, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return AccessToken{}, ErrBadKey
+		}
 		return AccessToken{}, fmt.Errorf("garmin: token endpoint returned %s", resp.Status)
 	}
 	raw, err := io.ReadAll(resp.Body)

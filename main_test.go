@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"garmin-sync/internal/fakes"
@@ -154,5 +159,73 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 		if !st.Done(id) {
 			t.Fatalf("activity %s not marked synced after resume", id)
 		}
+	}
+}
+
+// TestBadKeyExitsGarmin proves a rejected Garmin key maps to exitGarmin (3),
+// not the generic error code (per #84). The run stops at Authorize, before any
+// activity is listed, so nothing is uploaded.
+func TestBadKeyExitsGarmin(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "wrong-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected a run error on a bad key")
+	}
+	if got := mapGarminExit(err); got != exitGarmin {
+		t.Fatalf("exit code = %d, want %d (bad key)", got, exitGarmin)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("bad key uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// TestNonGarminErrorStaysGeneral proves the generic error path is untouched: a
+// state-load failure maps to exitGeneral (1), not the Garmin codes.
+func TestNonGarminErrorStaysGeneral(t *testing.T) {
+	if got := mapGarminExit(errors.New("some other failure")); got != exitGeneral {
+		t.Fatalf("exit code = %d, want %d (general)", got, exitGeneral)
+	}
+}
+
+// TestErrorPrintedOnStderr proves main()'s error path still prints the one-line
+// `error:` message the task asks for (per #84). The exit-code tests call
+// mapGarminExit directly and never see main()'s stderr, so this exercises the
+// print-and-exit contract directly: it must print `error: <msg>` and exit with
+// the mapped code. A swallowed error print would be a silent failure an athlete
+// can't act on. exitError takes its exit function as an argument, so we can
+// pass a fake one and read stderr without os.Exit killing the test process.
+func TestErrorPrintedOnStderr(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	calledWith := -1
+	exitError(errors.New("boom"), func(code int) { calledWith = code })
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	r.Close()
+
+	if !strings.Contains(buf.String(), "error: boom") {
+		t.Fatalf("expected an 'error: boom' line on stderr, got %q", buf.String())
+	}
+	if calledWith != exitGeneral {
+		t.Fatalf("exit code = %d, want %d (general)", calledWith, exitGeneral)
 	}
 }
