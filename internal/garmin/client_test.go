@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,5 +240,90 @@ func TestRefreshStill401IsBadKey(t *testing.T) {
 
 	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrBadKey) {
 		t.Fatalf("expected ErrBadKey when the refresh itself 401s, got %v", err)
+	}
+}
+
+// TestRateLimitedWrapsErrRateLimited proves a 429 at a protected endpoint
+// surfaces as garmin.ErrRateLimited, so main can give a rate limit its own
+// exit code (per #84).
+func TestRateLimitedWrapsErrRateLimited(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected errors.Is(err, ErrRateLimited), got %v", err)
+	}
+}
+
+// TestRateLimitedHonoursRetryAfter proves the client waits for the Retry-After
+// window before giving up: a 2s header means the back-off took at least that
+// long, rather than returning immediately.
+func TestRateLimitedHonoursRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 2*time.Second {
+		t.Fatalf("back-off took %v, want >= 2s (honoured Retry-After)", elapsed)
+	}
+}
+
+// TestRateLimitedDoesNotRetry proves the client stops after a single 429 —
+// no retry loop that would keep hammering a rate-limited API.
+func TestRateLimitedDoesNotRetry(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		// Only ever answer the first call; a retry would hit an unclosed
+		// server and panic. If we get here twice the client retried.
+		if atomic.AddInt32(&calls, 1) > 1 {
+			t.Error("client retried a 429; expected to stop after one")
+		}
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
 	}
 }

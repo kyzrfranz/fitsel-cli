@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,37 @@ const BaseURL = "https://personal.connectapi.garmin.com"
 // endpoint: the key is invalid and will not work until the athlete creates a
 // new one. Callers branch on it with errors.Is.
 var ErrBadKey = errors.New("garmin: invalid API key")
+
+// ErrRateLimited is returned when Garmin rate-limits a protected call (429): the
+// client backs off for Retry-After (a safe default if the header is absent) and
+// returns this once, so the run stops cleanly instead of hammering the API.
+// Callers branch on it with errors.Is.
+var ErrRateLimited = errors.New("garmin: rate limited")
+
+// defaultRetryAfter is the back-off the client honours when Garmin returns a
+// 429 without a Retry-After header: the Personal API does not document it, so
+// this is a safe default rather than an immediate retry (see the README).
+const defaultRetryAfter = 30 * time.Second
+
+// retryAfter parses a Retry-After header (Garmin's Personal API does not
+// document it) and returns how long to wait before giving up. It accepts the
+// two forms the HTTP spec allows — an absolute HTTP date or a number of
+// seconds — and falls back to a safe default when the header is missing or
+// unparseable, so a malformed header never triggers an immediate retry.
+func retryAfter(h string) time.Duration {
+	if h == "" {
+		return defaultRetryAfter
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return defaultRetryAfter
+}
 
 // Client talks to Garmin's Personal API. It owns its access token: once
 // Authorize has succeeded, List and Download refresh it transparently when it
@@ -182,6 +214,14 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// Garmin is asking us to slow down: back off for Retry-After (a safe
+		// default if the header is absent) and stop cleanly. No retry loop —
+		// the run returns ErrRateLimited so main gives it its own exit code.
+		resp.Body.Close()
+		time.Sleep(retryAfter(resp.Header.Get("Retry-After")))
+		return nil, ErrRateLimited
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		// The token was rejected: force a refresh (do not go through bearer(),
