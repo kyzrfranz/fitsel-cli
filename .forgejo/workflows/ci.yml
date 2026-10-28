@@ -54,3 +54,13 @@ jobs:
             if ! bash -n "$f"; then echo "syntax error: $f" >&2; rc=1; fi
           done <<< "$files"
           exit $rc
+      - name: Build and test Go (no network)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          # No network: tests run against httptest fakes only.
+          export GOPROXY=off
+          go build ./...
+          go vet ./...
+          go test ./...
