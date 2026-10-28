@@ -16,9 +16,9 @@ import (
 
 // Credentials holds the three secrets the tool needs.
 type Credentials struct {
-	GarminKey  string
-	FitselToken string
-	FitselPasskey string
+	GarminKey     string `json:"garmin_api_key"`
+	FitselToken   string `json:"fitsel_token"`
+	FitselPasskey string `json:"fitsel_passkey"`
 }
 
 // ErrMissingCredentials is returned when a required secret is absent.
@@ -29,14 +29,18 @@ var ErrMissingCredentials = errors.New("missing credentials")
 // (mode 0600) on first use.
 func Load() (Credentials, error) {
 	var c Credentials
+	// The config file is read first; any field it leaves empty is filled from
+	// the environment, so an environment variable wins per key and the file
+	// fills the gaps.
+	c = loadFromFile()
 	var missing []string
-	if c.GarminKey = os.Getenv("GARMIN_API_KEY"); c.GarminKey == "" {
+	if c.GarminKey = envOr("GARMIN_API_KEY", c.GarminKey); c.GarminKey == "" {
 		missing = append(missing, "GARMIN_API_KEY")
 	}
-	if c.FitselToken = os.Getenv("FITSEL_TOKEN"); c.FitselToken == "" {
+	if c.FitselToken = envOr("FITSEL_TOKEN", c.FitselToken); c.FitselToken == "" {
 		missing = append(missing, "FITSEL_TOKEN")
 	}
-	if c.FitselPasskey = os.Getenv("FITSEL_PASSKEY"); c.FitselPasskey == "" {
+	if c.FitselPasskey = envOr("FITSEL_PASSKEY", c.FitselPasskey); c.FitselPasskey == "" {
 		missing = append(missing, "FITSEL_PASSKEY")
 	}
 	if len(missing) > 0 {
@@ -87,4 +91,13 @@ func loadFromFile() Credentials {
 	var c Credentials
 	_ = json.Unmarshal(b, &c)
 	return c
+}
+
+// envOr returns the value of the environment variable, or fallback if it is
+// unset or empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
