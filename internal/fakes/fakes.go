@@ -27,6 +27,7 @@ type FakeGarmin struct {
 	Server     *httptest.Server
 	Key        string // the API key it accepts
 	Tokens     int    // how many tokens have been issued
+	Downloads  int    // how many activity files have been downloaded
 	activities []FakeActivity
 	mu         sync.Mutex
 }
@@ -119,6 +120,7 @@ func (f *FakeGarmin) handleDownload(w http.ResponseWriter, r *http.Request) {
 			z.Close()
 			zw.Flush()
 			w.Header().Set("Content-Type", "application/x-zip-compressed")
+			f.Downloads++
 			return
 		}
 	}

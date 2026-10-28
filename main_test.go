@@ -89,6 +89,11 @@ func TestDryRunUploadsNothing(t *testing.T) {
 	if st.Done("1001") || st.Done("1002") || st.Done("1003") {
 		t.Fatalf("dry-run marked activities synced; expected none")
 	}
+	// Under dry-run, no file was downloaded from Garmin either: a preview
+	// performs no transfers at all, not just no uploads.
+	if gar.Downloads != 0 {
+		t.Fatalf("dry-run downloaded %d files; expected none", gar.Downloads)
+	}
 }
 
 // TestResumeAfterInterruptedSync is the task's own check (the reason this story
