@@ -5,6 +5,8 @@
 package fakes
 
 import (
+	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -12,23 +14,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"mime"
 	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
-	"archive/zip"
-	"bufio"
 )
 
 // FakeGarmin is a fake Garmin Personal API server.
 type FakeGarmin struct {
-	Server    *httptest.Server
-	Key       string // the API key it accepts
-	Tokens    int    // how many tokens have been issued
+	Server     *httptest.Server
+	Key        string // the API key it accepts
+	Tokens     int    // how many tokens have been issued
 	activities []FakeActivity
-	mu        sync.Mutex
+	mu         sync.Mutex
 }
 
 // FakeActivity is one activity the fake Garmin serves.

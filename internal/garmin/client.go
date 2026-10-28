@@ -32,7 +32,7 @@ const BaseURL = "https://personal.connectapi.garmin.com"
 type Client struct {
 	baseURL string
 	key     string
-	http      *http.Client
+	http    *http.Client
 }
 
 // New returns a client for the athlete's key.
@@ -92,7 +92,7 @@ func (c *Client) Authorize(ctx context.Context) (AccessToken, error) {
 
 // activity is the minimal shape of a SummarizedActivityDTO we need.
 type activity struct {
-	ActivityID int64 `json:"activityId"`
+	ActivityID   int64  `json:"activityId"`
 	ActivityName string `json:"activityName"`
 	StartTimeGMT string `json:"startTimeGMT"`
 }

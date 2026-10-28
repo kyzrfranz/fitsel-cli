@@ -23,11 +23,11 @@ import (
 
 // exit codes
 const (
-	exitOK       = 0
-	exitConfig   = 2
-	exitGarmin   = 3
-	exitUpload   = 4
-	exitGeneral  = 1
+	exitOK      = 0
+	exitConfig  = 2
+	exitGarmin  = 3
+	exitUpload  = 4
+	exitGeneral = 1
 )
 
 // test hooks: overridden by tests to point at the fake servers.
