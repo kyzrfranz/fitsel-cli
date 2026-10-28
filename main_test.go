@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,11 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 	defer gar.Close()
 	fits := fakes.NewFakeFitsel("test-passkey")
-	fits.FailOnce = true // kill the run on the second activity's upload
+	// Fail every upload attempt: a single 500 no longer hard-stops the run
+	// (it retries and recovers), so to exercise "stop on failure, then resume
+	// clean on rerun" the fake must fail every attempt. Cleared by the run's
+	// state, so the resume run succeeds.
+	fits.Statuses = []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError}
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
@@ -128,8 +133,8 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 		"-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token",
 	}
 
-	// First run: 1001 uploads (202, marked done, saved), then 1002's upload
-	// fails and the run stops with an error — the "kill".
+	// First run: 1001's upload fails (500, after retries) and the run stops
+	// with an error — the "kill". 1001 is not marked done, so it is retried.
 	if err := run(args); err == nil {
 		t.Fatal("first run: expected an upload error, got nil")
 	}
@@ -298,5 +303,119 @@ func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 0 {
 		t.Fatalf("rate limit uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// newFitselArgs wires the fakes and credentials for a run and returns the args,
+// so each fitsel end-to-end case can focus on the one status it scripts.
+func newFitselArgs(t *testing.T, dir string, fits *fakes.FakeFitsel) []string {
+	t.Helper()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	t.Cleanup(gar.Close)
+	t.Cleanup(fits.Close)
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	return []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+}
+
+// TestBadSignatureExitsFitselProves a 401 (bad passkey) maps to its own exit
+// code, uploads nothing, and marks nothing synced (per #85).
+func TestBadSignatureExitsFitselAndUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.Statuses = []int{http.StatusUnauthorized}
+	args := newFitselArgs(t, dir, fits)
+
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected an upload error on a bad signature")
+	}
+	if got := mapGarminExit(err); got != exitBadSignature {
+		t.Fatalf("exit code = %d, want %d (bad signature)", got, exitBadSignature)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("bad signature uploaded %d files; expected none", len(fits.Uploadees))
+	}
+	st, err := state.Load(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st.Done("1001") {
+		t.Fatal("bad signature marked an activity synced; expected none")
+	}
+}
+
+// TestUnknownWebhookExitsFitselProves a 404 (unknown webhook token) maps to its
+// own exit code, uploads nothing, and marks nothing synced (per #85).
+func TestUnknownWebhookExitsFitselAndUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.Statuses = []int{http.StatusNotFound}
+	args := newFitselArgs(t, dir, fits)
+
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected an upload error on an unknown webhook token")
+	}
+	if got := mapGarminExit(err); got != exitWebhookMissing {
+		t.Fatalf("exit code = %d, want %d (unknown webhook token)", got, exitWebhookMissing)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("unknown webhook uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// TestInvalidUploadExitsFitselProves a 400 (invalid multipart) maps to its own
+// exit code, uploads nothing, and marks nothing synced (per #85).
+func TestInvalidUploadExitsFitselAndUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.Statuses = []int{http.StatusBadRequest}
+	args := newFitselArgs(t, dir, fits)
+
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected an upload error on an invalid upload")
+	}
+	if got := mapGarminExit(err); got != exitUpload {
+		t.Fatalf("exit code = %d, want %d (invalid upload)", got, exitUpload)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("invalid upload uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// TestUploadExhaustedExitsFitselProves repeated 500s (or a dead network) exhaust
+// the retries, map to their own exit code, and mark nothing synced (per #85).
+func TestUploadExhaustedExitsFitselAndUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	// Fail every attempt: the run retries (3 total) then gives up.
+	fits.Statuses = []int{
+		http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError,
+		http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError,
+	}
+	args := newFitselArgs(t, dir, fits)
+
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected an upload error after the retries are exhausted")
+	}
+	if got := mapGarminExit(err); got != exitUploadExhausted {
+		t.Fatalf("exit code = %d, want %d (upload exhausted)", got, exitUploadExhausted)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("exhausted upload uploaded %d files; expected none", len(fits.Uploadees))
+	}
+	st, err := state.Load(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st.Done("1001") {
+		t.Fatal("exhausted upload marked an activity synced; expected none")
 	}
 }

@@ -10,6 +10,11 @@
 //     keyed with the athlete's fitsel passkey.
 //   - Responses: 202 accepted; 400 invalid multipart/no FIT part; 401 bad
 //     signature; 404 unknown webhook token; 500 server error, retry later.
+//
+// Upload classifies every failure into one of four sentinels (ErrBadRequest,
+// ErrBadSignature, ErrNotFound, ErrUploadExhausted) so a caller can give each
+// its own exit code. A 500 or a network error is retried a few times before it
+// becomes ErrUploadExhausted; a 400/401/404 is terminal and never retried.
 package fitsel
 
 import (
@@ -17,11 +22,48 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"time"
 )
+
+// Sentinel errors returned by Upload, one per real failure. Callers branch on
+// them with errors.Is so main can give each its own exit code.
+var (
+	// ErrBadRequest is returned when fitsel rejects the upload as malformed
+	// (400): the multipart body has no FIT part or is otherwise invalid.
+	// Terminal — a retry would fail the same way.
+	ErrBadRequest = errors.New("fitsel: invalid upload")
+
+	// ErrBadSignature is returned when fitsel rejects the HMAC signature
+	// (401): the passkey is wrong and will not work until the athlete copies
+	// the right one from fitsel's setup page. Terminal — like a bad Garmin
+	// key, it will not fix itself.
+	ErrBadSignature = errors.New("fitsel: bad signature")
+
+	// ErrNotFound is returned when fitsel does not know the webhook token
+	// (404): the webhook URL is wrong. Terminal — a retry would fail the
+	// same way.
+	ErrNotFound = errors.New("fitsel: webhook token not found")
+
+	// ErrUploadExhausted is returned when fitsel returns a 500 or the upload
+	// cannot reach fitsel at all, after the retries are used up. The run
+	// stops cleanly and nothing is marked synced.
+	ErrUploadExhausted = errors.New("fitsel: upload failed after retries")
+)
+
+// uploadAttempts is the total number of upload attempts (1 initial + retries).
+// The pitch says "retry a few times" without a count; three is a safe default
+// that gives a transient 500 or a momentary network drop a chance to recover
+// without making a broken webhook wait long (see the README).
+const uploadAttempts = 3
+
+// uploadDelay is the fixed wait between upload attempts. A couple of seconds
+// lets a transient server error or network blip clear before the next try.
+const uploadDelay = 2 * time.Second
 
 // Client uploads FIT files to a fitsel webhook.
 type Client struct {
@@ -35,8 +77,40 @@ func New(webhookURL, passkey string) *Client {
 	return &Client{webhookURL: webhookURL, passkey: passkey, http: &http.Client{Timeout: 60 * time.Second}}
 }
 
-// Upload sends a FIT file and reports whether fitsel accepted it (202).
+// Upload sends a FIT file and reports whether fitsel accepted it (202). It
+// returns nil only on 202; every other outcome returns a sentinel error that a
+// caller can branch on with errors.Is:
+//
+//   - 400 invalid multipart/no FIT part  -> ErrBadRequest
+//   - 401 bad signature                   -> ErrBadSignature
+//   - 404 unknown webhook token           -> ErrNotFound
+//   - 500 / network failure (all attempts) -> ErrUploadExhausted
+//
+// A 500 or network failure is retried (see uploadAttempts); a 400/401/404 is
+// terminal and never retried.
 func (c *Client) Upload(fit []byte) (bool, error) {
+	var lastErr error
+	for attempt := 1; attempt <= uploadAttempts; attempt++ {
+		accepted, err := c.uploadOnce(fit)
+		if err == nil {
+			return accepted, nil
+		}
+		// A malformed request or a bad key/token will not fix itself on a
+		// retry; surface it immediately rather than burning the attempts.
+		if errors.Is(err, ErrBadRequest) || errors.Is(err, ErrBadSignature) || errors.Is(err, ErrNotFound) {
+			return false, err
+		}
+		lastErr = err
+		if attempt < uploadAttempts {
+			time.Sleep(uploadDelay)
+		}
+	}
+	return false, fmt.Errorf("%w: %v", ErrUploadExhausted, lastErr)
+}
+
+// uploadOnce builds the multipart body, signs it, and sends a single request,
+// classifying the response into a sentinel. It returns nil only on 202.
+func (c *Client) uploadOnce(fit []byte) (bool, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile("fit", "activity.fit")
@@ -62,7 +136,19 @@ func (c *Client) Upload(fit []byte) (bool, error) {
 		return false, err
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusAccepted, nil
+
+	switch {
+	case resp.StatusCode == http.StatusAccepted:
+		return true, nil
+	case resp.StatusCode == http.StatusBadRequest:
+		return false, ErrBadRequest
+	case resp.StatusCode == http.StatusUnauthorized:
+		return false, ErrBadSignature
+	case resp.StatusCode == http.StatusNotFound:
+		return false, ErrNotFound
+	default:
+		return false, fmt.Errorf("fitsel: request returned %s", resp.Status)
+	}
 }
 
 // hmacSHA256Hex returns the hex HMAC-SHA256 of the raw body keyed by passkey.
