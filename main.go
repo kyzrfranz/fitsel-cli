@@ -99,15 +99,19 @@ func run(args []string) error {
 		return nil
 	}
 
+	if *dry {
+		fmt.Printf("%d activity(ies) would be uploaded:\n", len(pending))
+		for _, a := range pending {
+			fmt.Printf("  - %s (%s)\n", a.Name, itoa(a.ID))
+		}
+		return nil
+	}
+
 	for _, a := range pending {
 		fmt.Printf("syncing %s (%s)...\n", a.Name, itoa(a.ID))
 		fit, err := gar.Download(ctx, token, a.ID)
 		if err != nil {
 			return fmt.Errorf("downloading %s: %w", itoa(a.ID), err)
-		}
-		if *dry {
-			fmt.Printf("  [dry-run] would upload %d bytes\n", len(fit))
-			continue
 		}
 		accepted, err := up.Upload(fit)
 		if err != nil {
