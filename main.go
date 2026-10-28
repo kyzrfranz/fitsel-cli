@@ -38,8 +38,16 @@ var (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		os.Exit(mapGarminExit(err))
+		exitError(err, os.Exit)
 	}
+}
+
+// exitError prints the one-line error message and exits with the code mapped
+// from the failure. It is factored out so the print-and-exit contract can be
+// tested without os.Exit killing the test process (see TestErrorPrintedOnStderr).
+func exitError(err error, exit func(int)) {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	exit(mapGarminExit(err))
 }
 
 // mapGarminExit turns the two Garmin-side transport failures into their own

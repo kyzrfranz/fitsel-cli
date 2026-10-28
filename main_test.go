@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"garmin-sync/internal/fakes"
@@ -194,5 +198,34 @@ func TestBadKeyExitsGarmin(t *testing.T) {
 func TestNonGarminErrorStaysGeneral(t *testing.T) {
 	if got := mapGarminExit(errors.New("some other failure")); got != exitGeneral {
 		t.Fatalf("exit code = %d, want %d (general)", got, exitGeneral)
+	}
+}
+
+// TestErrorPrintedOnStderr proves main()'s error path still prints the one-line
+// `error:` message the task asks for (per #84). The exit-code tests call
+// mapGarminExit directly and never see main()'s stderr, so this exercises the
+// print-and-exit contract directly: it must print `error: <msg>` and exit with
+// the mapped code. A swallowed error print would be a silent failure an athlete
+// can't act on. exitError takes its exit function as an argument, so we can
+// pass a fake one and read stderr without os.Exit killing the test process.
+func TestErrorPrintedOnStderr(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	calledWith := -1
+	exitError(errors.New("boom"), func(code int) { calledWith = code })
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	r.Close()
+
+	if !strings.Contains(buf.String(), "error: boom") {
+		t.Fatalf("expected an 'error: boom' line on stderr, got %q", buf.String())
+	}
+	if calledWith != exitGeneral {
+		t.Fatalf("exit code = %d, want %d (general)", calledWith, exitGeneral)
 	}
 }
