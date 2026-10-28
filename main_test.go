@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"garmin-sync/internal/config"
 	"garmin-sync/internal/fakes"
+	"garmin-sync/internal/garmin"
 	"garmin-sync/internal/state"
 )
 
@@ -420,5 +422,146 @@ func TestUploadExhaustedExitsFitselAndUploadsNothing(t *testing.T) {
 	}
 	if st.Done("1001") {
 		t.Fatal("exhausted upload marked an activity synced; expected none")
+	}
+}
+
+// TestInitWritesNoSyncRun proves `garmin-sync init` is a distinct setup
+// subcommand: it writes the three secrets to the config and does not start a
+// sync run. It feeds the three secrets on stdin, then checks the file holds all
+// three via config.Load(). No environment is set, so the values come from the
+// file, not from env.
+func TestInitWritesNoSyncRun(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+	// No GARMIN_API_KEY / FITSEL_TOKEN / FITSEL_PASSKEY set: init writes them,
+	// and a later load reads them from the file alone.
+	t.Setenv("GARMIN_API_KEY", "")
+	t.Setenv("FITSEL_TOKEN", "")
+	t.Setenv("FITSEL_PASSKEY", "")
+
+	input := "garmin-key\nfitsel-token\nfitsel-passkey\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	creds, err := config.Load()
+	if err != nil {
+		t.Fatalf("load after init: %v", err)
+	}
+	if creds.GarminKey != "garmin-key" || creds.FitselToken != "fitsel-token" || creds.FitselPasskey != "fitsel-passkey" {
+		t.Fatalf("init did not store all three secrets: %+v", creds)
+	}
+}
+
+// TestInitRejectsEmptyProvesNoPartialConfig proves init writes nothing when any
+// of the three values is empty: a partial config would be a broken setup.
+func TestInitRejectsEmptyProvesNoPartialConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+
+	input := "garmin-key\n\nfitsel-passkey\n" // token is empty
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err == nil {
+		t.Fatal("expected an error when a value is empty")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("init wrote a config despite an empty value: %v", err)
+	}
+}
+
+// TestInitNeverLeaksSecret proves the acceptance requirement: init never prints,
+// logs or echoes a secret value on stdout. The prompts are the only thing
+// written to out, and they name the field, never its value.
+func TestInitNeverLeaksSecret(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FITSEL_CONFIG", filepath.Join(dir, "config.json"))
+
+	// Real-looking secrets that must never appear in the output.
+	input := "super-secret-garmin-key-XYZ\nsuper-secret-fitsel-token-ABC\nsuper-secret-passkey-DEF\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got := out.String()
+	for _, secret := range []string{"super-secret-garmin-key-XYZ", "super-secret-fitsel-token-ABC", "super-secret-passkey-DEF"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("init leaked a secret into output: %q", secret)
+		}
+	}
+}
+
+// TestInitConfirmNamesFileNoSecret proves the success message names the saved
+// file but contains no secret and none of the "<from fitsel's setup page>"
+// placeholders the missing-config test forbids.
+func TestInitConfirmNamesFileNoSecret(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+
+	input := "garmin-key\nfitsel-token\nfitsel-passkey\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, configPath) {
+		t.Fatalf("confirm message should name the saved file %q, got %q", configPath, got)
+	}
+	for _, bad := range []string{"<create one at", "<from fitsel", "garmin-key", "fitsel-token", "fitsel-passkey"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("confirm message leaked %q or a placeholder: %q", bad, got)
+		}
+	}
+}
+
+// TestInitThenRunEndToEnd proves "a later run reads the stored values back":
+// init writes the three secrets to the config file, then a run with no
+// environment set reads them from that file, authenticates to the fake Garmin
+// server and uploads every activity to the fake fitsel. httptest fakes +
+// in-process stdin only — no real network.
+func TestInitThenRunEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+	// No environment set: the run must read all three secrets from the file.
+	t.Setenv("GARMIN_API_KEY", "")
+	t.Setenv("FITSEL_TOKEN", "")
+	t.Setenv("FITSEL_PASSKEY", "")
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	// Point the clients at the fakes.
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	// init stores the three secrets that the later run will read from the file.
+	input := "test-garmin-key\ntest-fitsel-token\ntest-passkey\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// A later run: no env, so config.Load() reads all three from the file.
+	args := []string{
+		"-since", "2026-10-01",
+		"-state", statePath,
+		"-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token",
+	}
+	if err := run(args); err != nil {
+		t.Fatalf("run after init: %v", err)
+	}
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("expected 3 uploads from the stored creds, got %d", len(fits.Uploadees))
 	}
 }

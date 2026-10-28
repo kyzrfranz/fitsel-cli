@@ -9,11 +9,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"garmin-sync/internal/config"
 	"garmin-sync/internal/fitsel"
@@ -80,6 +83,12 @@ func mapGarminExit(err error) int {
 }
 
 func run(args []string) error {
+	// `init` is a distinct setup subcommand: it must never reach the sync path,
+	// so it is dispatched before any flag parsing below.
+	if len(args) > 0 && args[0] == "init" {
+		return initCommand(os.Stdin, os.Stdout, args[1:])
+	}
+
 	fs := flag.NewFlagSet("garmin-sync", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
@@ -164,4 +173,76 @@ func run(args []string) error {
 // itoa formats an activity id as a string key for the state file.
 func itoa(id int64) string {
 	return fmt.Sprintf("%d", id)
+}
+
+// initCommand is the interactive setup subcommand: it walks the athlete through
+// entering the three secrets and stores them in the home-dir config, instead of
+// editing the JSON by hand or setting env vars. It never starts a sync run.
+//
+// It prompts, in order, for the Garmin Personal API key, the fitsel webhook
+// token and the fitsel passkey, each read from in as one line with the trailing
+// newline trimmed. The three secrets are the only thing stored: there is no
+// endpoint prompt, so the static fitsel webhook URL from the pitch contract
+// stays as the tool's default.
+//
+// It takes its input and output as arguments so tests can feed stdin and read
+// the prompts in-process, with no real network and no real terminal.
+func initCommand(in io.Reader, out io.Writer, args []string) error {
+	// Any extra args are ignored: init takes no flags or endpoint.
+	reader := bufio.NewReader(in)
+
+	prompt := func(label string) (string, error) {
+		if _, err := fmt.Fprintf(out, "%s: ", label); err != nil {
+			return "", err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		return trimNewline(line), nil
+	}
+
+	garminKey, err := prompt("Garmin Personal API key")
+	if err != nil {
+		return fmt.Errorf("reading your Garmin key: %w", err)
+	}
+	fitselToken, err := prompt("fitsel webhook token")
+	if err != nil {
+		return fmt.Errorf("reading your fitsel webhook token: %w", err)
+	}
+	fitselPasskey, err := prompt("fitsel passkey")
+	if err != nil {
+		return fmt.Errorf("reading your fitsel passkey: %w", err)
+	}
+
+	// Require all three before writing anything: a partial config would be a
+	// broken setup the athlete would have to fix by hand.
+	if garminKey == "" || fitselToken == "" || fitselPasskey == "" {
+		return errors.New("all three values are required; nothing was saved")
+	}
+
+	creds := config.Credentials{
+		GarminKey:     garminKey,
+		FitselToken:   fitselToken,
+		FitselPasskey: fitselPasskey,
+	}
+	if err := creds.Save(); err != nil {
+		return fmt.Errorf("saving credentials: %w", err)
+	}
+
+	if _, err := fmt.Fprintln(out, "Credentials saved to "+config.Path()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// trimNewline drops a single trailing newline (and a following carriage return
+// from CRLF input) without touching any other character, so a secret is stored
+// exactly as typed.
+func trimNewline(s string) string {
+	if strings.HasSuffix(s, "\n") {
+		s = strings.TrimSuffix(s, "\n")
+		s = strings.TrimSuffix(s, "\r")
+	}
+	return s
 }
