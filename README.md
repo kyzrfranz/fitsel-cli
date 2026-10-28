@@ -1,5 +1,48 @@
 # garmin-sync
 
+## Configure
+
+The tool needs three secrets, loaded from the environment first and a config
+file second — an environment variable wins over the file for each key:
+
+| Variable | Used for |
+|---|---|
+| `GARMIN_API_KEY` | Your Garmin Personal API key (create one at developer.garmin.com). |
+| `FITSEL_TOKEN` | Your fitsel upload token (from fitsel's setup page). |
+| `FITSEL_PASSKEY` | Your fitsel upload passkey (from fitsel's setup page). |
+
+If any are missing, the tool writes a sample config file at the path below so
+you know where to put them. Secrets are never logged or printed.
+
+The config file lives at `~/.config/garmin-sync/config.json` (on Linux and
+macOS), mode `0600` (readable only by you); its directory is mode `0700`. Set
+`FITSEL_CONFIG` to use a different file. Edit it by hand:
+
+```json
+{"garmin_api_key":"<create one at developer.garmin.com>",
+"fitsel_token":"<from fitsel's setup page>",
+"fitsel_passkey":"<from fitsel's setup page>"}
+```
+
+If the file exists but is unreadable or not valid JSON, the tool reports a
+clear error naming the file — fix it, and the run will proceed.
+
+## Run
+
+```sh
+garmin-sync --since 2026-01-01
+```
+
+The first run needs `--since` to set your start date. Each later run uploads
+everything pending since then. See "Exit codes" below for what a run reports.
+
+## Schedule
+
+Run it on a schedule with cron (macOS) or systemd timer (Linux). A run exits
+`0` when it synced everything, or a non-zero code (see below) when it could
+not — so a cron can tell you success from a problem. Run it daily after you've
+trained.
+
 ## Exit codes
 
 A run stops with one of these codes so an athlete (or a cron) can act on it:
