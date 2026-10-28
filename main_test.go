@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -305,6 +306,152 @@ func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 0 {
 		t.Fatalf("rate limit uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// newManyActivities wires a fake Garmin serving n activities (paged at 100 by
+// the fakes' default list handler) plus a fake fitsel and the run args, for the
+// pagination end-to-end checks. No --to: the run must list every activity since
+// --since across pages and upload them all.
+func newManyActivities(t *testing.T, n int) (*fakes.FakeGarmin, *fakes.FakeFitsel, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(n, "2026-10-01"))
+	fits := fakes.NewFakeFitsel("test-passkey")
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	return gar, fits, []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+}
+
+// TestSyncPagesAllActivitiesUploadsEverything is the headline check for #95:
+// with more than 100 activities since --since and no --to, a single run
+// fetches them all across pages and uploads every one — none dropped at the old
+// 100 cap. The fakes page the list at 100 per request.
+func TestSyncPagesAllActivitiesUploadsEverything(t *testing.T) {
+	const n = 250
+	gar, fits, args := newManyActivities(t, n)
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("uploaded %d activities, want %d (none dropped at the 100 cap)", got, n)
+	}
+	// Every activity was requested across pages: offsets 0, 100 and 200.
+	want := []int{0, 100, 200}
+	if len(gar.PagesSeen) != len(want) {
+		t.Fatalf("list requests = %v, want %v", gar.PagesSeen, want)
+	}
+}
+
+// TestSyncPagesSecondRunUploadsNothing is the idempotence check for #95:
+// against fakes that page at 100, a single run uploads everything since --since;
+// the next run immediately reports nothing to sync — it lists the same pages,
+// finds every activity already marked synced, and uploads nothing.
+func TestSyncPagesSecondRunUploadsNothing(t *testing.T) {
+	const n = 150
+	_, fits, args := newManyActivities(t, n)
+	if err := run(args); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("first run uploaded %d, want %d", got, n)
+	}
+
+	if err := run(args); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("second run uploaded %d extra; expected nothing", got-n)
+	}
+	// The second run listed the same pages it did the first (it lists before
+	// filtering by state) but uploaded nothing: idempotent.
+}
+
+// TestSyncPagesDryRunListsBeyondFirstPage is the dry-run check for #95: it
+// lists every pending activity in range, including those beyond the old first
+// page of 100, and uploads nothing.
+func TestSyncPagesDryRunListsBeyondFirstPage(t *testing.T) {
+	const n = 120
+	gar, fits, args := newManyActivities(t, n)
+	args = append(args, "-dry-run")
+	if err := run(args); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != 0 {
+		t.Fatalf("dry run uploaded %d; expected none", got)
+	}
+	// The dry run still had to walk both pages to list everything in range.
+	if len(gar.PagesSeen) < 2 {
+		t.Fatalf("dry run fetched %v, want at least 2 pages (past the old 100 cap)", gar.PagesSeen)
+	}
+}
+
+// TestSyncPagesResumeAfterInterruptedUpload is the resume check for #95: a run
+// over more than one page killed after the first page's uploads completes on
+// rerun with every activity present exactly once. The kill is an upload error
+// boundary — the fake fails the first upload, the run stops, that activity is
+// not marked done, and the rerun finishes the rest across both pages.
+func TestSyncPagesResumeAfterInterruptedUpload(t *testing.T) {
+	const n = 150
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(n, "2026-10-01"))
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	// Fail every attempt so the run stops on the first upload (the "kill"), and
+	// the rerun — with the fake's FailOnce cleared — succeeds.
+	fits.Statuses = []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError}
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+
+	// First run: the first upload fails (500, after retries) and the run stops.
+	if err := run(args); err == nil {
+		t.Fatal("first run: expected an upload error, got nil")
+	}
+
+	// A clean rerun finishes the rest across both pages.
+	if err := run(args); err != nil {
+		t.Fatalf("resume run: %v", err)
+	}
+
+	// Every activity uploaded exactly once — fitsel dedupes by content.
+	for id := int64(1); id <= n; id++ {
+		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(id, 10))); got != 1 {
+			t.Fatalf("activity %d uploaded %d times; want exactly once", id, got)
+		}
+	}
+	if len(fits.Uploadees) != n {
+		t.Fatalf("expected %d uploads total, got %d", n, len(fits.Uploadees))
+	}
+
+	// State persisted across the two runs: all activities are marked synced.
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	for id := int64(1); id <= n; id++ {
+		if !st.Done(strconv.FormatInt(id, 10)) {
+			t.Fatalf("activity %d not marked synced after resume", id)
+		}
 	}
 }
 

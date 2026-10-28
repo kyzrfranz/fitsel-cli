@@ -57,6 +57,104 @@ func TestListEmpty(t *testing.T) {
 	}
 }
 
+// TestListPagesAllActivities is the fix for #95: with more than pageSize
+// (100) activities since --since, List walks every page and returns them all,
+// not just the first 100. The fake serves 250 activities; the client must
+// request offsets 0, 100 and 200 and return all 250, newest first.
+func TestListPagesAllActivities(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(250, "2026-10-01"))
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	acts, err := c.List(context.Background(), "2026-10-01")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(acts) != 250 {
+		t.Fatalf("expected 250 activities across all pages, got %d", len(acts))
+	}
+	// Newest first: offset 0 returned ids 1..100, so the first returned
+	// activity is id 1 and the last is id 250.
+	if acts[0].ID != 1 {
+		t.Fatalf("first activity id = %d, want 1 (newest, offset 0)", acts[0].ID)
+	}
+	if acts[len(acts)-1].ID != 250 {
+		t.Fatalf("last activity id = %d, want 250 (oldest, last page)", acts[len(acts)-1].ID)
+	}
+	// The client must have requested three pages: offsets 0, 100 and 200.
+	want := []int{0, 100, 200}
+	if len(g.PagesSeen) != len(want) {
+		t.Fatalf("list requests = %v, want 3 pages %v", g.PagesSeen, want)
+	}
+	for i, w := range want {
+		if g.PagesSeen[i] != w {
+			t.Fatalf("list request %d offset = %d, want %d", i, g.PagesSeen[i], w)
+		}
+	}
+}
+
+// TestListExactPageCountIsSinglePageBoundary asserts the boundary: exactly
+// pageSize (100) activities is one full page, so the client returns all 100 and
+// stops as soon as a page comes back short of pageSize (the empty page that
+// follows the full last one) — it does not loop forever. The extra empty page
+// is harmless: no data is lost or duplicated.
+func TestListExactPageCountIsSingleRequest(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(100, "2026-10-01"))
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	acts, err := c.List(context.Background(), "2026-10-01")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(acts) != 100 {
+		t.Fatalf("expected 100 activities, got %d", len(acts))
+	}
+	// Offsets 0 (full) then 100 (empty): the empty page ends the loop.
+	want := []int{0, 100}
+	if len(g.PagesSeen) != len(want) {
+		t.Fatalf("list requests = %v, want %v", g.PagesSeen, want)
+	}
+	// No duplicate ids across the two pages.
+	seen := map[int64]bool{}
+	for _, a := range acts {
+		if seen[a.ID] {
+			t.Fatalf("duplicate activity id %d across pages", a.ID)
+		}
+		seen[a.ID] = true
+	}
+}
+
+// TestListJustOverPageTriggersSecondPage is the other boundary: pageSize+1
+// activities is one full page plus one more, so the client makes two requests
+// and returns all 101.
+func TestListJustOverPageTriggersSecondPage(t *testing.T) {
+	g := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(101, "2026-10-01"))
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	acts, err := c.List(context.Background(), "2026-10-01")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(acts) != 101 {
+		t.Fatalf("expected 101 activities, got %d", len(acts))
+	}
+	want := []int{0, 100}
+	if len(g.PagesSeen) != len(want) {
+		t.Fatalf("list requests = %v, want %v", g.PagesSeen, want)
+	}
+}
+
 func TestDownloadUnwrapsZip(t *testing.T) {
 	g := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
 	defer g.Close()

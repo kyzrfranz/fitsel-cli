@@ -18,6 +18,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -30,6 +31,11 @@ type FakeGarmin struct {
 	Downloads  int    // how many activity files have been downloaded
 	activities []FakeActivity
 	mu         sync.Mutex
+
+	// PagesSeen records the start offset of each list request the server has
+	// served, in order — a test reads it to prove the client paginated
+	// (e.g. [0 100 200]). Empty until the first list request is served.
+	PagesSeen []int
 
 	// UnauthorizedOnce makes the next protected call (List or Download) return
 	// 401 once, then recover — a light way to exercise the client's refresh-on-
@@ -62,10 +68,36 @@ type FakeActivity struct {
 // NewActivities returns the sample activities used across the tests.
 func NewActivities() []FakeActivity {
 	return []FakeActivity{
-		{ID: 1001, Name: "Morning Run", StartTimeGMT: "2026-10-20T07:00:00Z"},
-		{ID: 1002, Name: "Evening Ride", StartTimeGMT: "2026-10-25T18:30:00Z"},
-		{ID: 1003, Name: "Weekend Hike", StartTimeGMT: "2026-10-27T09:15:00Z"},
+		{ID: 1001, Name: "Morning Run", StartTimeGMT: "2026-10-20 07:00:00"},
+		{ID: 1002, Name: "Evening Ride", StartTimeGMT: "2026-10-25 18:30:00"},
+		{ID: 1003, Name: "Weekend Hike", StartTimeGMT: "2026-10-27 09:15:00"},
 	}
+}
+
+// ManyActivities returns n activities (id 1..n, newest first) all at or after
+// the given start date, so a test can serve more than one page (pageSize) of
+// the list endpoint — the shape a real athlete past the first 100 has. The
+// list endpoint sorts by beginTimestamp desc, so they must be built newest
+// first: id 1 is the newest, id n the oldest.
+//
+// The dates are built as ISO-8601 (T...Z) so the fake's lexicographic
+// startDate filter orders them correctly; each is a full day apart so all n are
+// distinct and all fall after a --since of 2026-10-01.
+func ManyActivities(n int, startDate string) []FakeActivity {
+	acts := make([]FakeActivity, 0, n)
+	for i := 1; i <= n; i++ {
+		// Day 300-i keeps them all after 2026-10-01 and ordered newest-first
+		// as i grows (id 1 is the newest). A full day apart keeps each date
+		// distinct and the string comparison in the fake's list handler
+		// ordering correct.
+		day := 300 - i
+		acts = append(acts, FakeActivity{
+			ID:           int64(i),
+			Name:         fmt.Sprintf("Activity %d", i),
+			StartTimeGMT: fmt.Sprintf("2026-12-%02dT09:00:00Z", day),
+		})
+	}
+	return acts
 }
 
 // NewFakeGarmin returns a fake that accepts key and serves these activities.
@@ -145,13 +177,30 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	startDate := r.URL.Query().Get("startDate")
+	start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	f.mu.Lock()
+	f.PagesSeen = append(f.PagesSeen, start)
+	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []FakeActivity
+	// Filter by startDate, then return the page [start, start+limit): this is
+	// what makes the fake page like the real endpoint, so a client that ignores
+	// the offset would see the same first page twice and a client that does not
+	// page would miss everything past the first page.
+	var matched []FakeActivity
 	for _, a := range f.activities {
 		if startDate == "" || a.StartTimeGMT >= startDate {
-			out = append(out, a)
+			matched = append(matched, a)
 		}
+	}
+	var out []FakeActivity
+	if start < len(matched) {
+		high := start + limit
+		if high > len(matched) || limit == 0 {
+			high = len(matched)
+		}
+		out = matched[start:high]
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
