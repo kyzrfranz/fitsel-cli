@@ -152,6 +152,29 @@ When the list looks right, run it again without `--dry-run` to upload.
   Default: `~/.config/garmin-sync/state.json`.
 - `--fitsel-endpoint <url>` — the fitsel webhook base URL. Default:
   `https://ingest.fitsel.app/ingest/wh`.
+- `--skip-threshold <N>` — how many times an activity may fail to sync before it
+  is skipped. Default: `3`. Pass `0` to disable the skip and retry every
+  failing activity forever.
+- `--unskip` — retry activities that were skipped for failing too many times.
+  Clears the skip and exits without a sync run, so you can confirm the problem is
+  fixed first.
+
+### Activities that keep failing
+
+An activity that fails to sync is retried each run — but only so many times.
+After it has failed `--skip-threshold` times (default 3) it is marked
+**skipped**: it is left alone until you run with `--unskip`, and skipped
+activities are listed in the run summary:
+
+```
+done: 2 synced, 1 failed this run
+skipped 1 activity (failed too many times): 1001
+```
+
+The failure count is saved with the state file, so the count survives across
+runs; a threshold reached in one run is still there the next. The threshold
+itself is a per-run setting and is not saved, so you can change it without
+changing what is already skipped.
 
 ## Schedule
 

@@ -316,6 +316,14 @@ func (f *FakeFitsel) Count(fit []byte) int {
 	return f.Counts[string(fit)]
 }
 
+// FailNextQueues the given statuses to be consumed one per upload, in order, so
+// a test can script a sequence across runs. It replaces any pending queue.
+func (f *FakeFitsel) FailNextQueued(statuses ...int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Statuses = append([]int{}, statuses...)
+}
+
 func (f *FakeFitsel) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// Decide this upload's fate up front, under one lock so it is ordered
 	// against FailOnce and Counts. FailOnce still wins (a run killed mid-way):
