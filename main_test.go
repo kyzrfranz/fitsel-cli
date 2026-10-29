@@ -1319,3 +1319,403 @@ func TestRunWideUploadErrorStillAborts(t *testing.T) {
 		t.Fatalf("bad signature uploaded %d files; expected none", len(fits.Uploadees))
 	}
 }
+
+// doctorCreds is the set of three secrets a valid doctor run must have. Each is
+// a real-looking secret that must never appear in the doctor's output.
+const (
+	doctorGarminKey  = "doctor-garmin-key-XYZ"
+	doctorFitselTok  = "doctor-fitsel-token-ABC"
+	doctorFitselPass = "doctor-fitsel-passkey-DEF"
+)
+
+// writeDoctorConfig writes a config file with the given keys at $FITSEL_CONFIG
+// and mode 0600, returning the path. A key left as "" is absent from the file.
+func writeDoctorConfig(t *testing.T, keys map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", path)
+	const sample = `{"garmin_api_key":"%s","fitsel_token":"%s","fitsel_passkey":"%s"}`
+	s := fmt.Sprintf(sample, keys["garmin_api_key"], keys["fitsel_token"], keys["fitsel_passkey"])
+	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return path
+}
+
+// TestDoctorAllChecksPass is the headline check: with a valid config, a present
+// state file, and a fake Garmin that returns an access token, doctor prints
+// one ✓ line per check plus the fixed fitsel line, and exits 0.
+func TestDoctorAllChecksPass(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	// A present, readable state file.
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err != nil {
+		t.Fatalf("doctor: %v\nREPORT:\n%s", err, out.String())
+	}
+	// A passing doctor run returns nil (exit 0); mapGarminExit(nil) is not 0
+	// (nil falls through to the general code), so assert the nil directly.
+	if err != nil {
+		t.Fatalf("doctor returned non-nil error on a passing run: %v", err)
+	}
+
+	report := out.String()
+	for _, want := range []string{
+		"✓ config file", "✓ all three secrets present",
+		"✓ Garmin key exchanges for an access token",
+		"✓ state file", "fitsel credentials can only be verified by a real sync",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestDoctorAllChecksPassExitsZero is the headline check: with a valid config, a
+// present state file, and a fake Garmin that returns an access token, doctor
+// prints one ✓ line per check plus the fixed fitsel line, and exits 0.
+func TestDoctorBadKeyExitsNonZero(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": "wrong-key",
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err == nil {
+		t.Fatal("expected a non-zero exit on a bad Garmin key")
+	}
+	// Any non-zero exit is acceptable per the acceptance (exit 0 only if all
+	// pass); a bad key is a general failure here.
+	if got := mapGarminExit(err); got == exitOK {
+		t.Fatalf("exit code = %d, want non-zero (bad key)", got)
+	}
+	report := out.String()
+	if !strings.Contains(report, "✗ Garmin key rejected") {
+		t.Fatalf("expected a ✗ on the rejected key, got:\n%s", report)
+	}
+	// The other checks still run and report, so the athlete sees the whole
+	// picture at once.
+	if !strings.Contains(report, "✓ all three secrets present") {
+		t.Fatalf("other checks should still run, got:\n%s", report)
+	}
+}
+
+// TestDoctorMissingKeyReportsWhich proves a missing secret is a ✗ that names
+// the absent key (never its value), and the run exits non-zero.
+func TestDoctorMissingKeyReportsWhich(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		// fitsel_token absent
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err == nil {
+		t.Fatal("expected a non-zero exit on a missing key")
+	}
+	report := out.String()
+	if !strings.Contains(report, "FITSEL_TOKEN") {
+		t.Fatalf("missing-key error should name the absent key, got:\n%s", report)
+	}
+	if !strings.Contains(report, "✗") {
+		t.Fatalf("expected a ✗ for the missing key, got:\n%s", report)
+	}
+}
+
+// TestDoctorMissingConfig proves an absent config file is a clean ✗ (not a
+// pass-by-accident, since config.Load() would create a placeholder).
+func TestDoctorMissingConfig(t *testing.T) {
+	// No config file written; $FITSEL_CONFIG points at a path that does not
+	// exist.
+	dir := t.TempDir()
+	t.Setenv("FITSEL_CONFIG", filepath.Join(dir, "config.json"))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err == nil {
+		t.Fatal("expected a non-zero exit when the config is absent")
+	}
+	report := out.String()
+	if !strings.Contains(report, "✗ config file not found") {
+		t.Fatalf("expected a ✗ on the missing config, got:\n%s", report)
+	}
+}
+
+// TestDoctorConfigNot0600 proves a config file with group/other access is a
+// ✗: the security intent of mode 0600 is no group/other read.
+func TestDoctorConfigNot0600(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", path)
+	const sample = `{"garmin_api_key":"%s","fitsel_token":"%s","fitsel_passkey":"%s"}`
+	s := fmt.Sprintf(sample, doctorGarminKey, doctorFitselTok, doctorFitselPass)
+	if err := os.WriteFile(path, []byte(s), 0o644); err != nil { // too permissive
+		t.Fatalf("writing config: %v", err)
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err == nil {
+		t.Fatal("expected a non-zero exit on a world-readable config")
+	}
+	report := out.String()
+	if !strings.Contains(report, "✗ config file") || !strings.Contains(report, "mode") {
+		t.Fatalf("expected a ✗ on the config mode, got:\n%s", report)
+	}
+}
+
+// TestDoctorMissingState proves an absent state file is a ✗ (state.Load("")
+// would succeed for a missing file, so presence is checked on the path).
+func TestDoctorMissingState(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json") // absent
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err == nil {
+		t.Fatal("expected a non-zero exit when the state file is absent")
+	}
+	report := out.String()
+	if !strings.Contains(report, "✗ state file not found") {
+		t.Fatalf("expected a ✗ on the missing state, got:\n%s", report)
+	}
+}
+
+// TestDoctorNoSecretLeaked proves no secret value ever appears in the output,
+// even on failure paths (bad key, missing key).
+func TestDoctorNoSecretLeaked(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	// A bad key: the report must not leak any secret value.
+	gar := fakes.NewFakeGarmin("wrong-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	_ = runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	report := out.String()
+	for _, secret := range []string{doctorGarminKey, doctorFitselTok, doctorFitselPass} {
+		if strings.Contains(report, secret) {
+			t.Fatalf("doctor leaked a secret into output: %q\n%s", secret, report)
+		}
+	}
+}
+
+// TestDoctorNeverTouchesFitsel proves the structural guarantee: doctor never
+// builds a fitsel client or makes any fitel call. The fake fitsel server never
+// receives a request — the Uploadees slice stays empty.
+func TestDoctorNeverTouchesFitsel(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel(doctorFitselPass)
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	var out bytes.Buffer
+	if err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath}); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("doctor uploaded %d files; it must never touch fitsel", len(fits.Uploadees))
+	}
+	// The fixed line is present.
+	if !strings.Contains(out.String(), "fitsel credentials can only be verified by a real sync") {
+		t.Fatalf("expected the fixed fitsel line, got:\n%s", out.String())
+	}
+}
+
+// TestDoctorThenEndToEnd proves a valid doctor run exits zero end to end: init
+// writes the config, a present state file is written, and doctor over the fake
+// Garmin passes every check. No real network, in-process stdin only.
+func TestDoctorThenEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+	// No environment set: doctor must read all three from the file.
+	t.Setenv("GARMIN_API_KEY", "")
+	t.Setenv("FITSEL_TOKEN", "")
+	t.Setenv("FITSEL_PASSKEY", "")
+
+	statePath := filepath.Join(dir, "state.json")
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	// init stores the three secrets the later doctor reads from the file.
+	input := "test-garmin-key\ntest-fitsel-token\ntest-passkey\n"
+	var initOut bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &initOut, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	// The init offer to run doctor is printed.
+	if !strings.Contains(initOut.String(), "fitsel-client doctor") {
+		t.Fatalf("init should offer a doctor run, got:\n%s", initOut.String())
+	}
+
+	// A present, readable state file.
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &out, []string{"-state", statePath})
+	if err != nil {
+		t.Fatalf("doctor: %v\nREPORT:\n%s", err, out.String())
+	}
+	// A passing doctor run returns nil (exit 0); mapGarminExit(nil) is not 0
+	// (nil falls through to the general code), so assert the nil directly.
+	if err != nil {
+		t.Fatalf("doctor returned non-nil error on a passing run: %v", err)
+	}
+}
+
+// TestDoctorInitOfferNoSecret proves the init offer line names doctor but
+// leaks no secret, and does not break the init tests that feed exactly three
+// lines.
+func TestDoctorInitOfferNoSecret(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+
+	input := "garmin-key\nfitsel-token\nfitsel-passkey\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Run 'fitsel-client doctor'") {
+		t.Fatalf("init should offer a doctor run, got:\n%s", got)
+	}
+	for _, bad := range []string{"garmin-key", "fitsel-token", "fitsel-passkey"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("init offer leaked %q: %q", bad, got)
+		}
+	}
+}

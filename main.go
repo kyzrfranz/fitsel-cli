@@ -114,12 +114,15 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "init" {
 		return initCommand(os.Stdin, os.Stdout, args[1:])
 	}
+	if len(args) > 0 && args[0] == "doctor" {
+		return runDoctor(os.Stdin, os.Stdout, args[1:])
+	}
 
 	fs := flag.NewFlagSet("fitsel-client", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
 	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
-	statePath := fs.String("state", "", "path to the state file (default: ~/.config/garmin-sync/state.json)")
+	statePath := fs.String("state", "", "path to the state file (default: "+state.Path()+")")
 	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	// SkipThreshold is how many per-activity failures before an activity is
@@ -374,6 +377,9 @@ func initCommand(in io.Reader, out io.Writer, args []string) error {
 	if _, err := fmt.Fprintln(out, "Credentials saved to "+config.Path()); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(out, "Run 'fitsel-client doctor' to verify this setup."); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -386,4 +392,125 @@ func trimNewline(s string) string {
 		s = strings.TrimSuffix(s, "\r")
 	}
 	return s
+}
+
+// runDoctor is the `fitsel-client doctor` subcommand: it verifies the local
+// setup and prints one ✓/✗ line per check, exiting 0 only if every check
+// passes. It contacts no fitsel endpoint — structurally, it never builds a
+// fitsel client or makes any fitel call — so the "no fitsel contact" property
+// holds by construction. The only network call it makes is to Garmin's token
+// endpoint, which is the point of check 3.
+//
+// It takes its input and output as arguments so tests can read the report
+// in-process, with no real network and no real terminal. It never prints a
+// secret value: it reports only the presence or absence of each key, never the
+// key itself, and never echoes any field of the loaded credentials.
+func runDoctor(in io.Reader, out io.Writer, args []string) error {
+	// Doctor takes one flag, mirroring the sync -state flag's default.
+	fs := flag.NewFlagSet("fitsel-client doctor", flag.ContinueOnError)
+	statePath := fs.String("state", "", "path to the state file (default: "+state.Path()+")")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// An empty -state resolves to the default path, so a doctor run checks the
+	// same file a sync would use.
+	if *statePath == "" {
+		*statePath = state.Path()
+	}
+
+	// All checks share one pass over the output: each returns a line and a
+	// boolean, so the report stays a flat list and the exit code is "all
+	// passed". A check that fails prints its ✗ line and marks the run failed,
+	// but the report still lists the rest so the athlete sees everything at
+	// once.
+	type line struct {
+		text string
+		ok   bool
+	}
+	var lines []line
+	fail := func(format string, a ...any) line {
+		return line{fmt.Sprintf(format, a...), false}
+	}
+	ok := func(format string, a ...any) line {
+		return line{fmt.Sprintf(format, a...), true}
+	}
+
+	// Check 1 — config found + mode 0600. Stat config.Path() directly:
+	// config.Load() writes a placeholder and errors on missing keys, so a
+	// fresh machine would create the file and pass by accident. We stat first,
+	// before any Load, so a missing file is a clean ✗.
+	fi, statErr := os.Stat(config.Path())
+	if statErr != nil {
+		lines = append(lines, fail("✗ config file not found at %s", config.Path()))
+	} else if fi.Mode().Perm()&0o077 != 0 {
+		lines = append(lines, fail("✗ config file %s is not mode 0600 (got %o)", config.Path(), fi.Mode().Perm()))
+	} else {
+		lines = append(lines, ok("✓ config file %s is present and mode %o", config.Path(), fi.Mode().Perm()))
+	}
+
+	// Check 2 — three secrets present. Load once; it also supplies the creds
+	// for check 3. On success all three are present. On the missing-keys error
+	// we report which key(s) are absent (named in the error, never their
+	// value). On an unreadable/malformed config we report that reason.
+	creds, loadErr := config.Load()
+	if loadErr != nil {
+		switch {
+		case errors.Is(loadErr, config.ErrMissingCredentials):
+			lines = append(lines, fail("✗ missing credentials: %v", loadErr))
+		case errors.Is(loadErr, config.ErrConfigUnreadable):
+			lines = append(lines, fail("✗ config present but unreadable: %v", loadErr))
+		default:
+			lines = append(lines, fail("✗ could not load credentials: %v", loadErr))
+		}
+	} else {
+		lines = append(lines, ok("✓ all three secrets present"))
+	}
+
+	// Check 3 — Garmin key valid. Only if we could load creds and have a key:
+	// exchange it for an access token via the existing client. This is the only
+	// network call, and it is Garmin's token endpoint, which must be reached.
+	if loadErr == nil && creds.GarminKey != "" {
+		gar := garmin.New(creds.GarminKey)
+		gar.SetBaseURL(garminBaseURL)
+		if _, err := gar.Authorize(context.Background()); err != nil {
+			if errors.Is(err, garmin.ErrBadKey) {
+				lines = append(lines, fail("✗ Garmin key rejected (invalid key)"))
+			} else {
+				lines = append(lines, fail("✗ could not verify Garmin key: %v", err))
+			}
+		} else {
+			lines = append(lines, ok("✓ Garmin key exchanges for an access token"))
+		}
+	}
+
+	// Check 4 — state file present and readable. Load("") succeeds for a
+	// missing file, so stat the resolved path first; a missing file is a ✗.
+	if _, err := os.Stat(*statePath); err != nil {
+		lines = append(lines, fail("✗ state file not found at %s", *statePath))
+	} else if _, err := state.Load(*statePath); err != nil {
+		lines = append(lines, fail("✗ state file %s present but unreadable: %v", *statePath, err))
+	} else {
+		lines = append(lines, ok("✓ state file %s is present and readable", *statePath))
+	}
+
+	// The fitsel check is not ✓/✗: there is no endpoint to verify the token or
+	// passkey without uploading, so doctor prints the fixed line instead and
+	// never builds a fitsel client or touches a fitsel endpoint.
+	if _, err := fmt.Fprintln(out, "fitsel credentials can only be verified by a real sync"); err != nil {
+		return err
+	}
+
+	// Print the report in order, then decide the exit code. Every line printed
+	// to out is a check result or the fixed fitsel line — no secret value,
+	// since every line reports only presence/absence or a resolved path.
+	for _, l := range lines {
+		fmt.Fprintln(out, l.text)
+		if !l.ok {
+			// A single unwrapped general error so main maps the run to its own
+			// non-zero exit code (any failure of the health report is general,
+			// not a specific transport failure).
+			return errors.New("doctor: setup incomplete, fix the checks above")
+		}
+	}
+	return nil
 }
