@@ -1897,6 +1897,64 @@ func TestMidCancelStopsRunWithoutMarkingInFlightSynced(t *testing.T) {
 	}
 }
 
+// TestInterruptPrintsNonErrorLineOnStderr proves the interrupt line a cancelled
+// run writes to stderr is its own dedicated line, not the generic `error:` line
+// (per #135 criterion 2). A Ctrl-C is the athlete asking to stop, not a
+// failure, so it must not ride the `error:` printer that hides a stop behind a
+// fake failure. It drives reportError directly (the same print-and-exit
+// contract TestErrorPrintedOnStderr exercises for the error path) and captures
+// stderr to check the exact line and exit code.
+func TestInterruptPrintsNonErrorLineOnStderr(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	calledWith := -1
+	reportError(errInterrupted, func(code int) { calledWith = code })
+
+	w.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	r.Close()
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stderr has %d line(s), want exactly 1 reporting line: %q", len(lines), buf.String())
+	}
+	if lines[0] == "" {
+		t.Fatal("stderr is empty; the interrupt should report the stop on one line")
+	}
+	if strings.HasPrefix(lines[0], "error:") {
+		t.Fatalf("interrupt line %q must not begin with 'error:' (a stop is not a failure)", lines[0])
+	}
+	if calledWith != exitInterrupted {
+		t.Fatalf("exit code = %d, want %d (interrupted)", calledWith, exitInterrupted)
+	}
+}
+
+// TestInterruptLineReportsTheStop asserts the interrupt line names the stop so
+// the athlete (or cron) knows what happened without a failure, while still
+// being a single self-describing line.
+func TestInterruptLineReportsTheStop(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	reportError(errInterrupted, func(int) {})
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	r.Close()
+
+	if !strings.Contains(buf.String(), "interrupted") {
+		t.Fatalf("interrupt line %q should report the stop", buf.String())
+	}
+}
+
 // TestFitselUploadDelayBailsEarlyOnCancel proves the fitsel retry delay honours
 // the context: a 500 that would normally wait uploadDelay before retrying
 // returns as soon as the ctx is cancelled, well under the delay.

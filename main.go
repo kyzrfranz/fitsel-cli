@@ -74,9 +74,24 @@ var errPartialFailure = errors.New("partial: activity sync failed")
 var errInterrupted = errors.New("sync interrupted")
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		exitError(err, os.Exit)
+	err := run(os.Args[1:])
+	if err != nil {
+		reportError(err, os.Exit)
 	}
+}
+
+// reportError prints the run's failure and exits with the mapped code. An
+// interrupted run (a Ctrl-C / SIGTERM the athlete asked for) is reported with
+// its own one-line message and its own exit code, not the generic `error:`
+// line — a stop is the athlete asking to pause, not a failure. Everything else
+// falls through to exitError.
+func reportError(err error, exit func(int)) {
+	if errors.Is(err, errInterrupted) {
+		fmt.Fprintln(os.Stderr, "sync interrupted")
+		exit(exitInterrupted)
+		return
+	}
+	exitError(err, exit)
 }
 
 // exitError prints the one-line error message and exits with the code mapped
