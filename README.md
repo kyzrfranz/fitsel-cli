@@ -111,6 +111,13 @@ fitsel-client --since 2026-01-01
 The first run needs `--since` to set your start date. Each later run uploads
 everything pending since then. See "Exit codes" below for what a run reports.
 
+A run prints a one-line summary at the end — how many activities synced and how
+many failed this run — so a schedule can tell success from a partial one:
+
+```
+done: 2 synced, 1 failed this run
+```
+
 ### Try it first with --dry-run
 
 Before your first real run, preview what would be uploaded with `--dry-run`.
@@ -219,13 +226,13 @@ A run stops with one of these codes so an athlete (or a schedule) can act on it:
 | 0 | Success. Synced everything that was pending. | Nothing. |
 | 1 | A general failure (network, fitsel, state, first run without `--since`). | See the message on the `error:` line. |
 | 3 | Your Garmin API key is invalid (Garmin returned 401). | Check `GARMIN_API_KEY` or create a new one at developer.garmin.com. |
-| 4 | A fit file would not be accepted by fitsel (returned 400). | Check that the file is a valid FIT — nothing was marked synced, so it will be retried. |
 | 5 | Garmin is rate-limiting you (429); the tool waited for the window in the `error:` line, then stopped. | Wait that long, then run again — do not retry sooner. |
 | 6 | Your fitsel passkey is invalid (fitsel returned 401). | Check `FITSEL_PASSKEY` or copy the right one from fitsel's setup page. |
 | 7 | The fitsel webhook token in the endpoint URL is unknown (fitsel returned 404). | Check the fitsel webhook URL you configured. |
 | 8 | fitsel would not accept the upload (server error 500 or no network); the tool tried a few times, then stopped. | Wait a moment, then run again — nothing was marked synced, so the pending activity will be retried. |
+| 9 | One or more activities failed to sync (a single bad upload or a download that dropped), but the rest of the run completed. | The other activities were synced and marked done; the failed ones are still pending. Run again to retry them — nothing marked synced needs to be retried. |
 
-More codes are added as features land (uploads). This list grows with them.
+More codes are added as features land. This list grows with them.
 
 ## Releases
 

@@ -42,6 +42,11 @@ type FakeGarmin struct {
 	// 401 without a real expired token. Cleared after it fires once.
 	UnauthorizedOnce bool
 
+	// DownloadFailOnce makes the next download return 404 once, then recover —
+	// a light way to exercise a transient per-activity download failure.
+	// Cleared after it fires once.
+	DownloadFailOnce bool
+
 	// ExpiredOnce makes the first token issued already expired, so the next
 	// protected call must refresh it — exercises the refresh-on-expiry path
 	// end to end. Cleared after it fires once.
@@ -232,6 +237,14 @@ func (f *FakeGarmin) handleDownload(w http.ResponseWriter, r *http.Request) {
 		f.UnauthorizedOnce = false
 		f.mu.Unlock()
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// DownloadFailOnce: fail the next download once with a 404, then recover —
+	// a transient per-activity download failure.
+	if f.DownloadFailOnce {
+		f.DownloadFailOnce = false
+		f.mu.Unlock()
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	f.mu.Unlock()
