@@ -56,9 +56,17 @@ The tool needs a Garmin Personal API key. Create one here:
 4. Copy the **client id** — that is the key the tool needs. Paste it into
    `GARMIN_API_KEY` (see [Configure](#configure)).
 
-The key lasts about 24 hours. It never needs a refresh token *because* it stays on
-the athlete's machine — there is no server to hold one. When it expires, just
-create a new one at the same page and paste it in.
+The key lasts a long time — Garmin issues it for 30 days to 1 year, depending on
+the option you pick when you create it (see Garmin's Personal API FAQ). It never
+needs a refresh token *because* it stays on the athlete's machine — there is no
+server to hold one.
+
+The tool does not use the key for every call: it fetches a fresh access token
+from it on every run, and that token is what actually authenticates a sync. The
+access token lasts 24 hours and has no refresh token, so the tool simply asks
+for a new one at the start of the next run — you do not need to replace the key
+on that cycle. If the key itself ever stops working, create a new one at the same
+page and paste it in.
 
 ## 3. Get the fitsel token and passkey
 
@@ -261,7 +269,7 @@ A run stops with one of these codes so an athlete (or a schedule) can act on it:
 |---|---|---|
 | 0 | Success. Synced everything that was pending. | Nothing. |
 | 1 | A general failure (network, fitsel, state, first run without `--since`). | See the message on the `error:` line. |
-| 3 | Your Garmin API key is invalid (Garmin returned 401). | Check `GARMIN_API_KEY` or create a new one at developer.garmin.com. |
+| 3 | Your Garmin API key is invalid or expired (Garmin returned 401). | Create a new one at developer.garmin.com — see [Create the Garmin key](#2-create-the-garmin-key). |
 | 5 | Garmin is rate-limiting you (429); the tool waited for the window in the `error:` line, then stopped. | Wait that long, then run again — do not retry sooner. |
 | 6 | Your fitsel passkey is invalid (fitsel returned 401). | Check `FITSEL_PASSKEY` or copy the right one from fitsel's setup page. |
 | 7 | The fitsel webhook token in the endpoint URL is unknown (fitsel returned 404). | Check the fitsel webhook URL you configured. |
