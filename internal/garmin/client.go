@@ -215,7 +215,7 @@ func (c *Client) listPage(ctx context.Context, startDate, endDate string, start 
 	q.Set("sortBy", "beginTimestamp")
 	q.Set("sortOrder", "desc")
 	u := fmt.Sprintf("%s/activitylist-service/activities/search/activities?%s", c.baseURL, q.Encode())
-	body, err := c.get(ctx, u)
+	body, err := c.get(ctx, "listing activities", u)
 	if err != nil {
 		return nil, err
 	}
@@ -237,8 +237,10 @@ func (c *Client) listPage(ctx context.Context, startDate, endDate string, start 
 // refreshing the token once if Garmin rejects it (a 401). A 401 on a protected
 // endpoint means the token is bad, not the request, so bearer() refreshes it
 // once and the request is retried; if that also 401s, bearer() returns
-// ErrBadKey.
-func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
+// ErrBadKey. op names the caller in any wrapped error, so a failed Download
+// reports "downloading activity <id>" rather than the List's "listing
+// activities".
+func (c *Client) get(ctx context.Context, op, url string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -250,7 +252,7 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 	req.Header.Set("Authorization", "Bearer "+tok.token)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// Garmin is asking us to slow down: back off for Retry-After (a safe
@@ -282,7 +284,7 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 		req.Header.Set("Authorization", "Bearer "+tok.token)
 		resp, err = c.http.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("listing activities: %w", err)
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		// The refreshed token was rejected too: the key itself is bad, not
 		// just the token, so surface it as ErrBadKey rather than a raw status.
@@ -302,7 +304,7 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 // ZIP archive Garmin returns.
 func (c *Client) Download(ctx context.Context, id int64) ([]byte, error) {
 	u := fmt.Sprintf("%s/download-service/files/activity/%d", c.baseURL, id)
-	body, err := c.get(ctx, u)
+	body, err := c.get(ctx, fmt.Sprintf("downloading activity %d", id), u)
 	if err != nil {
 		return nil, err
 	}
