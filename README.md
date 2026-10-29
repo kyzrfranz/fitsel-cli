@@ -268,6 +268,7 @@ A run stops with one of these codes so an athlete (or a schedule) can act on it:
 | Code | Meaning | Do |
 |---|---|---|
 | 0 | Success. Synced everything that was pending. | Nothing. |
+| 4 | You stopped the run (Ctrl-C) while it was syncing. | Nothing was marked past where it stopped; the pending activities will be retried on the next run. |
 | 2 | Your configuration is wrong: a required secret is missing, or the config file is present but could not be read or parsed. | Fix the message on the `error:` line — set the missing secret, or check the config file at the path it names. |
 | 1 | A general failure (network, fitsel, state, first run without `--since`). | See the message on the `error:` line. |
 | 3 | Your Garmin API key is invalid or expired (Garmin returned 401). | Create a new one at developer.garmin.com — see [Create the Garmin key](#2-create-the-garmin-key). |

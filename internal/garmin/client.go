@@ -257,7 +257,16 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 		// default if the header is absent) and stop cleanly. No retry loop —
 		// the run returns ErrRateLimited so main gives it its own exit code.
 		resp.Body.Close()
-		time.Sleep(retryAfter(resp.Header.Get("Retry-After")))
+		// Honour the run's context while waiting: a Ctrl-C bails out of the
+		// back-off instead of sitting through the whole window, and the run
+		// treats it as an interrupt rather than a rate limit.
+		timer := time.NewTimer(retryAfter(resp.Header.Get("Retry-After")))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 		return nil, ErrRateLimited
 	}
 	if resp.StatusCode == http.StatusUnauthorized {

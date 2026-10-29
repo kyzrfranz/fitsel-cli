@@ -2,6 +2,7 @@ package fitsel
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -28,7 +29,7 @@ func TestUploadAccepted(t *testing.T) {
 
 	up := New(srv.URL, "", "passkey")
 	fit := []byte("FIT-DATA-1001")
-	accepted, err := up.Upload(fit)
+	accepted, err := up.Upload(context.Background(), fit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestUploadBadSignature(t *testing.T) {
 	defer srv.Close()
 
 	up := New(srv.URL, "", "passkey")
-	accepted, err := up.Upload([]byte("FIT"))
+	accepted, err := up.Upload(context.Background(), []byte("FIT"))
 	if err == nil {
 		t.Fatal("expected an error on a bad signature")
 	}
@@ -84,7 +85,7 @@ func TestUploadBadClassifiesEachSentinel(t *testing.T) {
 			defer srv.Close()
 
 			up := New(srv.URL, "", "passkey")
-			accepted, err := up.Upload([]byte("FIT"))
+			accepted, err := up.Upload(context.Background(), []byte("FIT"))
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -109,7 +110,7 @@ func TestUpload500RetriesThenExhausted(t *testing.T) {
 	defer srv.Close()
 
 	up := New(srv.URL, "", "passkey")
-	accepted, err := up.Upload([]byte("FIT"))
+	accepted, err := up.Upload(context.Background(), []byte("FIT"))
 	if err == nil {
 		t.Fatal("expected an error after retries")
 	}
@@ -139,7 +140,7 @@ func TestUpload500RecoversOnRetry(t *testing.T) {
 	defer srv.Close()
 
 	up := New(srv.URL, "", "passkey")
-	accepted, err := up.Upload([]byte("FIT"))
+	accepted, err := up.Upload(context.Background(), []byte("FIT"))
 	if err != nil {
 		t.Fatalf("expected a 202 after a transient 500, got %v", err)
 	}
@@ -162,7 +163,7 @@ func TestUploadBadRequestNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	up := New(srv.URL, "", "passkey")
-	if _, err := up.Upload([]byte("FIT")); !errors.Is(err, ErrBadRequest) {
+	if _, err := up.Upload(context.Background(), []byte("FIT")); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("expected ErrBadRequest, got %v", err)
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
@@ -199,7 +200,7 @@ func TestUploadBareTokenAppendsToBase(t *testing.T) {
 	defer srv.Close()
 
 	up := New(srv.URL, token, "passkey")
-	if accepted, err := up.Upload([]byte("FIT")); err != nil || !accepted {
+	if accepted, err := up.Upload(context.Background(), []byte("FIT")); err != nil || !accepted {
 		t.Fatalf("upload: accepted=%v err=%v", accepted, err)
 	}
 	if gotPath != "/my-webhook-token" {
@@ -235,7 +236,7 @@ func TestUploadFullURLOverridesBase(t *testing.T) {
 	up.http.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // trust the test server's self-signed cert
 	}
-	if accepted, err := up.Upload([]byte("FIT")); err != nil || !accepted {
+	if accepted, err := up.Upload(context.Background(), []byte("FIT")); err != nil || !accepted {
 		t.Fatalf("upload: accepted=%v err=%v", accepted, err)
 	}
 	if landedOnBase {

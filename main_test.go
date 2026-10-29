@@ -2,19 +2,24 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"garmin-sync/internal/config"
 	"garmin-sync/internal/fakes"
+	"garmin-sync/internal/fitsel"
 	"garmin-sync/internal/garmin"
 	"garmin-sync/internal/state"
 )
@@ -1806,5 +1811,158 @@ func TestDefaultStatePathIsUsedWithoutStateFlag(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 3 {
 		t.Fatalf("second run uploaded %d extra files; expected nothing (state not persisted by default)", len(fits.Uploadees)-3)
+	}
+}
+
+// TestMidCancelStopsRunWithoutMarkingInFlightSynced is the headline check: a
+// run over three activities cancelled while the third upload is genuinely in
+// flight stops promptly, maps to exitInterrupted, marks exactly the two that
+// succeeded as done, and leaves the third not-done.
+func TestMidCancelStopsRunWithoutMarkingInFlightSynced(t *testing.T) {
+	dir := t.TempDir()
+	stPath := filepath.Join(dir, "state.json")
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+
+	// The run's own context, which we cancel to simulate a Ctrl-C.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	// The upload server accepts the first two uploads, then blocks the third
+	// until the run's context is cancelled. The client aborts this connection
+	// the moment ctx is cancelled, so the run returns; the handler goroutine
+	// unblocks on the same ctx.
+	var uploads int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&uploads, 1)
+		if n == 3 {
+			<-ctx.Done()
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	fits.Server = srv
+
+	args := []string{"-since", "2026-10-01", "-state", stPath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- runWithCtx(ctx, args)
+	}()
+
+	// Wait until the third upload is in flight, then cancel.
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt32(&uploads) < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&uploads) < 3 {
+		t.Fatal("third upload never started")
+	}
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err == nil {
+			t.Fatal("expected a run error on cancel")
+		}
+		if got := mapExitCode(err); got != exitInterrupted {
+			t.Fatalf("exit code = %d, want %d (interrupted)", got, exitInterrupted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return after cancel")
+	}
+
+	// The two that succeeded before the stop are still saved.
+	st2, err := state.Load(stPath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st2.Done("1001") || !st2.Done("1002") {
+		t.Fatal("activities synced before the stop were not saved")
+	}
+	if st2.Done("1003") {
+		t.Fatal("the in-flight activity was marked synced after cancel")
+	}
+}
+
+// TestFitselUploadDelayBailsEarlyOnCancel proves the fitsel retry delay honours
+// the context: a 500 that would normally wait uploadDelay before retrying
+// returns as soon as the ctx is cancelled, well under the delay.
+func TestFitselUploadDelayBailsEarlyOnCancel(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	up := fitsel.New(srv.URL, "", "passkey")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := up.Upload(ctx, []byte("FIT"))
+		done <- err
+	}()
+
+	// Cancel during the retry delay (before the 2s uploadDelay elapses).
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a cancellation error from Upload")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Upload error = %v, want context.Canceled", err)
+		}
+		if got := atomic.LoadInt32(&attempts); got != 1 {
+			t.Fatalf("attempts = %d, want 1 (it bailed before the retry)", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Upload did not return after cancel")
+	}
+}
+
+// TestGarminRateLimitClientBailsEarly proves the Garmin client's 429 back-off
+// returns ctx.Err() instead of sitting through the full Retry-After window when
+// the context is cancelled.
+func TestGarminRateLimitClientBailsEarly(t *testing.T) {
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	gar.RateLimitOnce = true // Retry-After: 2s
+	defer gar.Close()
+	gc := garmin.New("test-garmin-key")
+	gc.SetBaseURL(gar.URL())
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := gc.List(ctx, "2026-10-01", "")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a cancellation error from List")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("List error = %v, want context.Canceled", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("back-off took %v; it should have bailed early on cancel, not waited the full Retry-After", elapsed)
 	}
 }
