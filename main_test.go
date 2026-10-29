@@ -596,7 +596,6 @@ func TestSkipAfterThresholdFailures(t *testing.T) {
 // persisted with the rest of the state: a run that fails an activity once,
 // then reloads, keeps counting toward the skip rather than restarting at zero.
 func TestSkipCountPersistsAcrossRuns(t *testing.T) {
-	const threshold = 3
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 
@@ -745,6 +744,46 @@ func TestSkipThresholdFlagOverride(t *testing.T) {
 	}
 	if !st.Skipped("1001") {
 		t.Fatal("1001 should be skipped at threshold 1")
+	}
+}
+
+// TestSkipThresholdZeroDisablesSkip proves --skip-threshold 0 turns the skip
+// off: an activity that fails every run is still retried every run and never
+// marked skipped, while its failure count still accumulates and persists.
+func TestSkipThresholdZeroDisablesSkip(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// Three runs, 1001 fails (400s) every run. With the default threshold 3 it
+	// would skip on the third; with 0 it must never skip.
+	for i := 0; i < 3; i++ {
+		gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+		garminBaseURL = gar.URL()
+		fits := fakes.NewFakeFitsel("test-passkey")
+		fits.FailNextQueued(http.StatusBadRequest)
+		fitselBaseURL = fits.URL()
+		t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+		t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+		t.Setenv("FITSEL_PASSKEY", "test-passkey")
+		args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token", "-skip-threshold", "0"}
+		if err := run(args); err == nil {
+			t.Fatal("run: expected a partial-failure error")
+		}
+		st, err := state.Load(statePath)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if st.Skipped("1001") {
+			t.Fatalf("run %d: 1001 should not be skipped with skip-threshold 0", i+1)
+		}
+	}
+	// The count still accumulates and persists across the runs.
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if got := st.FailCount("1001"); got != 3 {
+		t.Fatalf("1001 fail count = %d, want 3 (still counted, just never skipped)", got)
 	}
 }
 

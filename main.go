@@ -125,7 +125,7 @@ func run(args []string) error {
 	// SkipThreshold is how many per-activity failures before an activity is
 	// marked skipped (no longer retried until --unskip). A run carries it as a
 	// policy; the state file records only the per-activity count it counts
-	// toward (per #132).
+	// toward (per #132). Zero disables the skip entirely.
 	skipThreshold := fs.Int("skip-threshold", 3, "mark an activity skipped after this many sync failures (0 to disable)")
 	unskip := fs.Bool("unskip", false, "clear the skip on every activity so they are retried, then exit")
 	if err := fs.Parse(args); err != nil {
@@ -153,10 +153,14 @@ func run(args []string) error {
 		return fmt.Errorf("loading state: %w", err)
 	}
 	// A run carries the skip policy; the state defaults it to 3, and the flag
-	// overrides it. Zero or negative disables the skip entirely.
-	if *skipThreshold > 0 {
-		st.SkipThreshold = *skipThreshold
-	}
+	// overrides it. The flag is read with fs.Visit (not its default value) so
+	// 0 is honoured as "disable" rather than falling back to the default: the
+	// default only applies when the flag is left unset.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "skip-threshold" {
+			st.SkipThreshold = *skipThreshold
+		}
+	})
 	// --unskip clears the skip on every activity so they are retried, then
 	// exits without a sync run: it is a maintenance action, not a sync.
 	if *unskip {

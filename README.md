@@ -153,7 +153,8 @@ When the list looks right, run it again without `--dry-run` to upload.
 - `--fitsel-endpoint <url>` — the fitsel webhook base URL. Default:
   `https://ingest.fitsel.app/ingest/wh`.
 - `--skip-threshold <N>` — how many times an activity may fail to sync before it
-  is skipped. Default: `3`.
+  is skipped. Default: `3`. Pass `0` to disable the skip and retry every
+  failing activity forever.
 - `--unskip` — retry activities that were skipped for failing too many times.
   Clears the skip and exits without a sync run, so you can confirm the problem is
   fixed first.

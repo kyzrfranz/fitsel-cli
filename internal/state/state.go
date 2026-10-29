@@ -18,10 +18,10 @@ import (
 // State holds which activity IDs have been synced and how many times each has
 // failed, so a re-run is idempotent and stops chasing one that keeps failing.
 type State struct {
-	synced  map[string]bool
-	fails   map[string]int
-	skips   map[string]bool
-	path    string
+	synced map[string]bool
+	fails  map[string]int
+	skips  map[string]bool
+	path   string
 
 	// SkipThreshold is how many failures before an activity is skipped. It is
 	// not persisted: it is a policy a run carries (a flag, default 3), not
@@ -78,24 +78,23 @@ func (s *State) MarkDone(id string) { s.synced[id] = true }
 // Fail records that the activity failed to sync this run, returning whether it
 // has now reached SkipThreshold and must be skipped. A synced activity is not
 // counted: once synced it is out of the pending set, so its count never matters.
+// A SkipThreshold of 0 disables the skip: the activity is never skipped.
 func (s *State) Fail(id string) bool {
 	if s.synced[id] {
 		return false
 	}
+	if s.SkipThreshold <= 0 {
+		// The skip is disabled: still record the failure count (it is
+		// persisted and reported), but never mark the activity skipped.
+		s.fails[id]++
+		return false
+	}
 	s.fails[id]++
-	if s.fails[id] >= s.skipThreshold() {
+	if s.fails[id] >= s.SkipThreshold {
 		s.skips[id] = true
 		return true
 	}
 	return false
-}
-
-// skipThreshold returns the configured threshold, defaulting when unset.
-func (s *State) skipThreshold() int {
-	if s.SkipThreshold <= 0 {
-		return skipThreshold
-	}
-	return s.SkipThreshold
 }
 
 // Skipped reports whether the activity is marked skipped (has failed
