@@ -122,6 +122,12 @@ func run(args []string) error {
 	statePath := fs.String("state", "", "path to the state file (default: ~/.config/garmin-sync/state.json)")
 	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	// SkipThreshold is how many per-activity failures before an activity is
+	// marked skipped (no longer retried until --unskip). A run carries it as a
+	// policy; the state file records only the per-activity count it counts
+	// toward (per #132).
+	skipThreshold := fs.Int("skip-threshold", 3, "mark an activity skipped after this many sync failures (0 to disable)")
+	unskip := fs.Bool("unskip", false, "clear the skip on every activity so they are retried, then exit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -145,6 +151,23 @@ func run(args []string) error {
 	st, err := state.Load(*statePath)
 	if err != nil {
 		return fmt.Errorf("loading state: %w", err)
+	}
+	// A run carries the skip policy; the state defaults it to 3, and the flag
+	// overrides it. Zero or negative disables the skip entirely.
+	if *skipThreshold > 0 {
+		st.SkipThreshold = *skipThreshold
+	}
+	// --unskip clears the skip on every activity so they are retried, then
+	// exits without a sync run: it is a maintenance action, not a sync.
+	if *unskip {
+		for _, id := range st.Skips() {
+			st.Unskip(id)
+		}
+		if err := st.Save(); err != nil {
+			return fmt.Errorf("saving state: %w", err)
+		}
+		fmt.Println("cleared skip on all activities")
+		return nil
 	}
 
 	gar := garmin.New(creds.GarminKey)
@@ -193,13 +216,30 @@ func run(args []string) error {
 	synced, failed := 0, 0
 	var partial bool
 	for _, a := range pending {
-		fmt.Printf("syncing %s (%s)...\n", a.Name, itoa(a.ID))
+		id := itoa(a.ID)
+		// An activity that has failed SkipThreshold times is marked skipped:
+		// leave it alone until it is unskipped, and report it in the summary
+		// rather than retrying it every run.
+		if st.Skipped(id) {
+			fmt.Printf("skipping %s (%s): failed too many times, unskip to retry\n", a.Name, id)
+			continue
+		}
+		fmt.Printf("syncing %s (%s)...\n", a.Name, id)
 		fit, err := gar.Download(ctx, a.ID)
 		if err != nil {
 			// A per-activity download failure (a single activity's FIT is
-			// missing or the download dropped): log it, leave the activity
-			// pending, and move on. The rest of the run still syncs.
-			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", itoa(a.ID), err)
+			// missing or the download dropped): log it, count it, leave the
+			// activity pending, and move on. The rest of the run still syncs.
+			// If it has now failed too many times, it is marked skipped.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
+			if st.Fail(id) {
+				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
+			}
+			// Persist the incremented count (and any skip) so it survives
+			// across runs; a run that only saved on success would lose it.
+			if err := st.Save(); err != nil {
+				return fmt.Errorf("saving state: %w", err)
+			}
 			failed++
 			partial = true
 			continue
@@ -213,19 +253,32 @@ func run(args []string) error {
 				return err
 			}
 			// A per-activity upload failure (e.g. a malformed upload the
-			// endpoint rejects): log it, leave the activity pending, and
-			// move on. The rest of the run still syncs.
-			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", itoa(a.ID), err)
+			// endpoint rejects): log it, count it, leave the activity pending,
+			// and move on. The rest of the run still syncs.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
+			if st.Fail(id) {
+				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
+			}
+			// Persist the incremented count (and any skip) so it survives
+			// across runs; a run that only saved on success would lose it.
+			if err := st.Save(); err != nil {
+				return fmt.Errorf("saving state: %w", err)
+			}
 			failed++
 			partial = true
 			continue
 		}
 		_ = accepted // Upload returns nil only on 202; a nil error means success.
 		synced++
-		st.MarkDone(itoa(a.ID))
+		st.MarkDone(id)
 		if err := st.Save(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
+	}
+	// List any activities the run left skipped (they failed too many times), so
+	// the athlete knows what is no longer being retried and how to revive them.
+	if skipped := st.Skips(); len(skipped) > 0 {
+		fmt.Printf("skipped %d activity(ies) (failed too many times): %s\n", len(skipped), strings.Join(skipped, ", "))
 	}
 	if partial {
 		// The run finished but some activities failed. Print the summary and

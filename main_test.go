@@ -522,6 +522,232 @@ func TestUnknownWebhookExitsFitselAndUploadsNothing(t *testing.T) {
 	}
 }
 
+// TestSkipAfterThresholdFailures proves an activity that fails every run is
+// retried until it reaches the threshold, then skipped: it is no longer
+// downloaded or uploaded, and it is listed in the summary. The other activities
+// still sync.
+func TestSkipAfterThresholdFailures(t *testing.T) {
+	const threshold = 3
+	dir := t.TempDir()
+	// The first activity (1001) 400s (malformed) every run: a per-activity
+	// failure. The other two upload clean.
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.FailNextQueued(http.StatusBadRequest, http.StatusBadRequest, http.StatusBadRequest)
+	defer fits.Close()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+
+	st, err := state.Load(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SkipThreshold = threshold
+	statePath := filepath.Join(dir, "state.json")
+
+	// Fail once, twice: still retried, not skipped. Each run loads its own
+	// state from disk, so read the persisted skip from a fresh load after each.
+	for attempt := 1; attempt <= threshold-1; attempt++ {
+		// Reset the fake's status queue for this run: it fails the first upload
+		// (1001) again.
+		fits.FailNextQueued(http.StatusBadRequest)
+
+		err := run(newRunArgs(t, dir, gar, fits))
+		if err == nil {
+			t.Fatalf("run %d: expected a partial-failure error", attempt)
+		}
+		st, err := state.Load(statePath)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if st.Skipped("1001") {
+			t.Fatalf("run %d: 1001 should not be skipped before the threshold", attempt)
+		}
+	}
+
+	// The third failure reaches the threshold: 1001 is now skipped.
+	fits.FailNextQueued(http.StatusBadRequest)
+	err = run(newRunArgs(t, dir, gar, fits))
+	if err == nil {
+		t.Fatal("expected a partial-failure error on the threshold run")
+	}
+	st, err = state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st.Skipped("1001") {
+		t.Fatal("1001 should be skipped after threshold failures")
+	}
+
+	// A fourth run with the fake healthy must NOT retry 1001: it is skipped.
+	fits.FailNextQueued()
+	if err := run(newRunArgs(t, dir, gar, fits)); err != nil {
+		t.Fatalf("run after skip: %v", err)
+	}
+	// Only 1002 and 1003 were ever uploaded; 1001 stayed skipped.
+	if got := fits.Count([]byte("FIT-DATA-1002")) + fits.Count([]byte("FIT-DATA-1003")); got != 2 {
+		t.Fatalf("uploads = %d, want 2 (1002 and 1003; 1001 skipped)", got)
+	}
+	if c := fits.Count([]byte("FIT-DATA-1001")); c != 0 {
+		t.Fatalf("skipped activity 1001 was uploaded %d times; want 0", c)
+	}
+}
+
+// TestSkipCountPersistsAcrossRuns proves the fail count that drives the skip is
+// persisted with the rest of the state: a run that fails an activity once,
+// then reloads, keeps counting toward the skip rather than restarting at zero.
+func TestSkipCountPersistsAcrossRuns(t *testing.T) {
+	const threshold = 3
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// First run: 1001 fails once (its upload 400s). The other two upload clean.
+	gar1 := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar1.Close()
+	fits1 := fakes.NewFakeFitsel("test-passkey")
+	fits1.FailNextQueued(http.StatusBadRequest)
+	defer fits1.Close()
+	garminBaseURL = gar1.URL()
+	fitselBaseURL = fits1.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits1.URL() + "/ingest/wh/test-token"}
+	// The failure (1001) is per-activity: the run continues, 1002/1003 upload.
+	if err := run(args); err == nil {
+		t.Fatal("first run: expected a partial-failure error")
+	}
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st.FailCount("1001") != 1 {
+		t.Fatalf("1001 fail count = %d, want 1", st.FailCount("1001"))
+	}
+	if st.Skipped("1001") {
+		t.Fatal("1001 should not be skipped after one failure at threshold 3")
+	}
+
+	// Second run against a fresh state load (fresh process): the count is still
+	// 1, so it keeps accumulating toward the skip rather than restarting.
+	gar2 := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar2.Close()
+	fits2 := fakes.NewFakeFitsel("test-passkey")
+	fits2.FailNextQueued(http.StatusBadRequest, http.StatusBadRequest)
+	defer fits2.Close()
+	garminBaseURL = gar2.URL()
+	fitselBaseURL = fits2.URL()
+	args2 := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits2.URL() + "/ingest/wh/test-token"}
+	// 1001 fails again (its second), 1002 fails once. Neither skips yet.
+	if err := run(args2); err == nil {
+		t.Fatal("second run: expected a partial-failure error")
+	}
+	st2, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st2.FailCount("1001") != 2 {
+		t.Fatalf("1001 fail count = %d, want 2 (persisted from the first run)", st2.FailCount("1001"))
+	}
+
+	// Third run: 1001 fails a third time and reaches the threshold, so it skips.
+	fits2.FailNextQueued(http.StatusBadRequest, http.StatusBadRequest)
+	if err := run(args2); err == nil {
+		t.Fatal("third run: expected a partial-failure error")
+	}
+	st3, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st3.Skipped("1001") {
+		t.Fatal("1001 should be skipped after its third failure, persisted across runs")
+	}
+}
+
+// TestUnskipFlagRetries proves --unskip clears the skip on every activity so a
+// later run retries it, and exits without a sync run of its own.
+func TestUnskipFlagRetries(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// Drive 1001 to skipped across three runs, one failure each.
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	for i := 1; i <= 3; i++ {
+		fits.FailNextQueued(http.StatusBadRequest)
+		if err := run(args); err == nil {
+			t.Fatalf("run %d: expected a partial-failure error", i)
+		}
+		st, err := state.Load(statePath)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if i == 3 && !st.Skipped("1001") {
+			t.Fatal("1001 should be skipped after three failures")
+		}
+	}
+
+	// --unskip clears the skip and exits without a sync run.
+	if err := run(append(args, "--unskip")); err != nil {
+		t.Fatalf("--unskip: %v", err)
+	}
+	st2, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st2.Skipped("1001") {
+		t.Fatal("1001 should no longer be skipped after --unskip")
+	}
+	// The fail count is preserved, so the next failure skips again.
+	fits.FailNextQueued(http.StatusBadRequest)
+	if err := run(args); err == nil {
+		t.Fatal("expected a partial-failure error after unskip")
+	}
+	st3, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st3.Skipped("1001") {
+		t.Fatal("1001 should be skipped again (fail count preserved)")
+	}
+}
+
+// TestSkipThresholdFlagOverride proves the threshold is overridable per run: a
+// threshold of 1 skips an activity on its first failure.
+func TestSkipThresholdFlagOverride(t *testing.T) {
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	fits.FailNextQueued(http.StatusBadRequest)
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	statePath := filepath.Join(dir, "state.json")
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token", "-skip-threshold", "1"}
+	if err := run(args); err == nil {
+		t.Fatal("expected a partial-failure error")
+	}
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st.Skipped("1001") {
+		t.Fatal("1001 should be skipped at threshold 1")
+	}
+}
+
 // TestInvalidUploadIsPerActivityUploadsTheRest proves a malformed upload (400)
 // is a per-activity failure: it is logged and skipped, the run continues with
 // the other activities, and the run exits with the partial-failure code.
