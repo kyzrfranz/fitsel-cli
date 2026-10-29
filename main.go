@@ -1,4 +1,4 @@
-// Command garmin-sync is a client the athlete runs on their own machine: each
+// Command fitsel-client is a client the athlete runs on their own machine: each
 // run it uses the athlete's Garmin Personal API key to fetch the activities
 // they have not synced yet as FIT files, and uploads each one to the athlete's
 // fitsel upload webhook.
