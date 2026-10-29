@@ -9,12 +9,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          # No go.sum is tracked in this module, so there is nothing to cache.
+          # Re-enable cache again once a go.sum is added (that is what silences
+          # the "cache disabled" warning permanently).
+          cache: false
       - run: go test ./...
       - uses: goreleaser/goreleaser-action@v6
         with:
