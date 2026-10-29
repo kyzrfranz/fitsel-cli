@@ -118,10 +118,10 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 	defer gar.Close()
 	fits := fakes.NewFakeFitsel("test-passkey")
-	// Fail every upload attempt: a single 500 no longer hard-stops the run
-	// (it retries and recovers), so to exercise "stop on failure, then resume
-	// clean on rerun" the fake must fail every attempt. Cleared by the run's
-	// state, so the resume run succeeds.
+	// Fail every attempt: a single 500 no longer hard-stops the run (it retries
+	// and recovers), so to exercise "stop on failure, then resume clean on
+	// rerun" the fake must fail every attempt. Cleared by the run's state, so
+	// the resume run succeeds.
 	fits.Statuses = []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError}
 	defer fits.Close()
 
@@ -408,8 +408,10 @@ func TestSyncPagesResumeAfterInterruptedUpload(t *testing.T) {
 	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(n, "2026-10-01"))
 	defer gar.Close()
 	fits := fakes.NewFakeFitsel("test-passkey")
-	// Fail every attempt so the run stops on the first upload (the "kill"), and
-	// the rerun — with the fake's FailOnce cleared — succeeds.
+	// Fail every attempt: a single 500 no longer hard-stops the run (it retries
+	// and recovers), so to exercise "stop on failure, then resume clean on
+	// rerun" the fake must fail every attempt. Cleared by the run's state, so
+	// the resume run succeeds.
 	fits.Statuses = []int{http.StatusInternalServerError, http.StatusInternalServerError, http.StatusInternalServerError}
 	defer fits.Close()
 
@@ -520,26 +522,28 @@ func TestUnknownWebhookExitsFitselAndUploadsNothing(t *testing.T) {
 	}
 }
 
-// TestInvalidUploadExitsFitselProves a 400 (invalid multipart) maps to its own
-// exit code, uploads nothing, and marks nothing synced (per #85).
-func TestInvalidUploadExitsFitselAndUploadsNothing(t *testing.T) {
+// TestInvalidUploadIsPerActivityUploadsTheRest proves a malformed upload (400)
+// is a per-activity failure: it is logged and skipped, the run continues with
+// the other activities, and the run exits with the partial-failure code.
+func TestInvalidUploadIsPerActivityUploadsTheRest(t *testing.T) {
 	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
 	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	// The first upload is malformed (400): a per-activity failure, so the run
+	// skips it and uploads the other two.
 	fits.Statuses = []int{http.StatusBadRequest}
-	args := newFitselArgs(t, dir, fits)
 
-	err := run(args)
+	err := run(newRunArgs(t, dir, gar, fits))
 	if err == nil {
-		t.Fatal("expected an upload error on an invalid upload")
+		t.Fatal("expected a partial-failure error on a malformed upload")
 	}
-	if got := mapGarminExit(err); got != exitUpload {
-		t.Fatalf("exit code = %d, want %d (invalid upload)", got, exitUpload)
+	if got := mapGarminExit(err); got != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
 	}
-	if !strings.Contains(err.Error(), "invalid upload") {
-		t.Fatalf("error = %q, want it to mention the invalid upload", err)
-	}
-	if len(fits.Uploadees) != 0 {
-		t.Fatalf("invalid upload uploaded %d files; expected none", len(fits.Uploadees))
+	if len(fits.Uploadees) != 2 {
+		t.Fatalf("uploaded %d activities, want 2 (the two that succeeded)", len(fits.Uploadees))
 	}
 }
 
@@ -865,5 +869,124 @@ func TestRunWithInvalidEndToEndRejected(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 0 {
 		t.Fatalf("invalid --to uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// newRunArgs wires a fresh fake Garmin (three activities) and a fake fitsel
+// endpoint for a per-activity-failure run and returns the fitsel plus the run
+// args. The fake Garmin serves activities 1001, 1002, 1003 (newest first);
+// the run syncs from 2026-10-01, so all three are pending.
+func newRunArgs(t *testing.T, dir string, gar *fakes.FakeGarmin, fits *fakes.FakeFitsel) []string {
+	t.Helper()
+	statePath := filepath.Join(dir, "state.json")
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	return []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+}
+
+// TestOneFailedActivityUploadsTheRest is the headline check: a run over three
+// activities where the second activity's download fails once (a transient 404)
+// is logged and skipped, the other two still upload, and the run exits with the
+// dedicated partial-failure code. The failed activity is left pending for the
+// next run.
+func TestOneFailedActivityUploadsTheRest(t *testing.T) {
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	// The first download (activity 1001) 404s once, then recovers: a
+	// per-activity download failure, so the run continues with the other two.
+	gar.DownloadFailOnce = true
+
+	err := run(newRunArgs(t, dir, gar, fits))
+	if err == nil {
+		t.Fatal("expected a partial-failure error when one activity fails")
+	}
+	if got := mapGarminExit(err); got != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
+	}
+	// The other two activities were uploaded despite the first one failing.
+	if len(fits.Uploadees) != 2 {
+		t.Fatalf("uploaded %d activities, want 2 (the two that succeeded)", len(fits.Uploadees))
+	}
+	// The failed activity was not marked synced, so it is pending for rerun.
+	st, err := state.Load(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	synced := 0
+	for _, id := range []string{"1001", "1002", "1003"} {
+		if st.Done(id) {
+			synced++
+		}
+	}
+	if synced != 2 {
+		t.Fatalf("marked %d activities synced, want 2 (the two that uploaded)", synced)
+	}
+	// The failed one is left pending; a later run with the fake healthy finishes it.
+	if rerunErr := run(newRunArgs(t, dir, gar, fits)); rerunErr != nil {
+		t.Fatalf("rerun: %v", rerunErr)
+	}
+	if got := len(fits.Uploadees); got != 3 {
+		t.Fatalf("rerun uploaded %d total, want 3 (the pending one finished)", got)
+	}
+}
+
+// TestFailedUploadSkipsRest proves a per-activity upload failure (the first
+// upload 400s once, then recovers) is logged and the run continues with the
+// next activities, rather than stopping the run.
+func TestFailedUploadSkipsRest(t *testing.T) {
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	// The first upload 400s once (malformed) then recovers: a per-activity
+	// failure, so the run continues past it after the single retry.
+	fits.Statuses = []int{http.StatusBadRequest}
+
+	err := run(newRunArgs(t, dir, gar, fits))
+	if err == nil {
+		t.Fatal("expected a partial-failure error when an activity fails")
+	}
+	if got := mapGarminExit(err); got != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
+	}
+	// The other two activities were still sent.
+	if len(fits.Uploadees) != 2 {
+		t.Fatalf("uploaded %d activities, want 2 (the two that succeeded)", len(fits.Uploadees))
+	}
+}
+
+// TestRunWideUploadErrorStillAborts proves a run-wide upload failure (every
+// upload 401) still aborts with its own run-wide code, not the partial code:
+// the discriminator's retry of the first upload also fails, so the run stops.
+func TestRunWideUploadErrorStillAborts(t *testing.T) {
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	// Fail every upload (401 twice: the initial attempt and the run's single
+	// retry), so the bad signature is persistent and the run aborts.
+	fits.Statuses = []int{http.StatusUnauthorized, http.StatusUnauthorized}
+
+	err := run(newRunArgs(t, dir, gar, fits))
+	if err == nil {
+		t.Fatal("expected a run-wide error on a bad signature")
+	}
+	if got := mapGarminExit(err); got != exitBadSignature {
+		t.Fatalf("exit code = %d, want %d (bad signature, run-wide)", got, exitBadSignature)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("bad signature uploaded %d files; expected none", len(fits.Uploadees))
 	}
 }

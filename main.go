@@ -38,6 +38,13 @@ const (
 	exitBadSignature    = 6
 	exitWebhookMissing  = 7
 	exitUploadExhausted = 8
+
+	// partialFailure is returned when a run finished but at least one activity
+	// failed to sync (its download or upload errored): the run completed, but
+	// the athlete should re-run to retry the ones that failed. It is distinct
+	// from the run-wide codes above, which stop the whole run before any
+	// activity is attempted.
+	exitPartialFailure = 9
 )
 
 // test hooks: overridden by tests to point at the fake servers.
@@ -48,6 +55,11 @@ var (
 
 // version is set at release time by GoReleaser via -ldflags "-X main.version=...".
 var version = "dev"
+
+// errPartialFailure wraps the run when at least one activity failed to sync but
+// the run finished: it carries the count so main can print a one-line summary
+// and mapGarminExit can give the partial run its own exit code.
+var errPartialFailure = errors.New("partial: activity sync failed")
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -61,6 +73,17 @@ func main() {
 func exitError(err error, exit func(int)) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	exit(mapGarminExit(err))
+}
+
+// isRunWideUpload reports whether an upload failure is run-wide: it will fail
+// every activity, so the run must abort rather than skip one activity. A bad
+// passkey (401), a missing webhook (404), or fitsel giving up after retries
+// (500) are all persistent; a malformed upload (400) is a single bad activity
+// and is skipped.
+func isRunWideUpload(err error) bool {
+	return errors.Is(err, fitsel.ErrBadSignature) ||
+		errors.Is(err, fitsel.ErrNotFound) ||
+		errors.Is(err, fitsel.ErrUploadExhausted)
 }
 
 // mapGarminExit turns the transport failures into their own exit codes so an
@@ -81,6 +104,8 @@ func mapGarminExit(err error) int {
 		return exitWebhookMissing
 	case errors.Is(err, fitsel.ErrBadRequest):
 		return exitUpload
+	case errors.Is(err, errPartialFailure):
+		return exitPartialFailure
 	default:
 		return exitGeneral
 	}
@@ -168,22 +193,52 @@ func run(args []string) error {
 		return nil
 	}
 
+	synced, failed := 0, 0
+	var partial bool
 	for _, a := range pending {
 		fmt.Printf("syncing %s (%s)...\n", a.Name, itoa(a.ID))
 		fit, err := gar.Download(ctx, a.ID)
 		if err != nil {
-			return fmt.Errorf("downloading %s: %w", itoa(a.ID), err)
+			// A per-activity download failure (a single activity's FIT is
+			// missing or the download dropped): log it, leave the activity
+			// pending, and move on. The rest of the run still syncs.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", itoa(a.ID), err)
+			failed++
+			partial = true
+			continue
 		}
 		accepted, err := up.Upload(fit)
 		if err != nil {
-			return fmt.Errorf("uploading %s: %w", itoa(a.ID), err)
+			// An upload failure is run-wide: a bad passkey (401), a missing
+			// webhook (404), or fitsel giving up after retries (500) will
+			// fail every activity, so stop the run with its own exit code.
+			if isRunWideUpload(err) {
+				return err
+			}
+			// A per-activity upload failure (e.g. a malformed upload the
+			// endpoint rejects): log it, leave the activity pending, and
+			// move on. The rest of the run still syncs.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", itoa(a.ID), err)
+			failed++
+			partial = true
+			continue
 		}
 		_ = accepted // Upload returns nil only on 202; a nil error means success.
+		synced++
 		st.MarkDone(itoa(a.ID))
 		if err := st.Save(); err != nil {
 			return fmt.Errorf("saving state: %w", err)
 		}
 	}
+	if partial {
+		// The run finished but some activities failed. Print the summary and
+		// return a partial-failure error so main maps it to its own non-zero
+		// exit code; the run completed, so this is distinct from the run-wide
+		// codes that abort before any activity is attempted.
+		fmt.Printf("done: %d synced, %d failed this run\n", synced, failed)
+		return fmt.Errorf("%w: %d activity(ies) failed to sync", errPartialFailure, failed)
+	}
+	fmt.Printf("done: %d synced, %d failed this run\n", synced, failed)
 	return nil
 }
 
