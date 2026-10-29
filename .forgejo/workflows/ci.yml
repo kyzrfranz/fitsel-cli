@@ -16,6 +16,10 @@ jobs:
           server_url="${{ forgejo.server_url }}"
           host="${server_url#https://}"
           host="${host#http://}"
+          # server_url also carries the project path (e.g. /braintrust), so strip
+          # to the first path segment: a host ending in /project makes the clone
+          # URL .../project/project/repo.git -> "not found" at checkout.
+          host="${host%%/*}"
           repo="${{ forgejo.repository }}"
           if [ -n "$token" ]; then
             url="https://x-access-token:${token}@${host}/${repo}.git"
@@ -66,72 +70,58 @@ jobs:
           go test ./...
   build:
     # Cross-compile the release binaries for every supported platform,
-    # on every merge to main (ADR 0067). Publishes them as CI artifacts,
-    # untagged, so the founder can tag and publish v1.
+    # on every merge to main (ADR 0067). Publishes them untagged on the
+    # release-binaries branch, so the founder can tag and publish v1.
+    #
+    # One job (not a matrix): the matrix pushed from a detached HEAD to a
+    # branch that did not exist locally, and four jobs collided on one branch.
+    # A single job cross-compiles all four targets, stages them, commits once,
+    # and pushes with `--force HEAD:refs/heads/release-binaries` (safe on the
+    # detached HEAD the desk runner leaves us on).
     if: github.ref == 'refs/heads/main'
     needs: check
     runs-on: desk
-    strategy:
-      matrix:
-        include:
-          - os: darwin
-            arch: arm64
-            out: garmin-sync
-          - os: linux
-            arch: amd64
-            out: garmin-sync-linux-amd64
-          - os: linux
-            arch: arm64
-            out: garmin-sync-linux-arm64
-          - os: windows
-            arch: amd64
-            out: garmin-sync-windows-amd64.exe
     steps:
       - name: Checkout repository
         run: |
           set -euo pipefail
           token="${{ forgejo.token }}"
-          # server_url already carries the scheme (e.g. https://office-local…ts.net),
-          # so strip it before building the host to avoid a doubled scheme
-          # (https://https://…) that makes git clone fail at checkout.
+          # server_url also carries the project path (e.g. /braintrust), so
+          # strip to the first path segment: a host ending in /project makes
+          # the clone URL .../project/project/repo.git -> "not found".
           server_url="${{ forgejo.server_url }}"
           host="${server_url#https://}"
           host="${host#http://}"
+          host="${host%%/*}"
           repo="${{ forgejo.repository }}"
           if [ -n "$token" ]; then
-            url="https://x-access-token:${token}@${host}/braintrust/${repo}.git"
+            url="https://x-access-token:${token}@${host}/${repo}.git"
           else
             url="https://${host}/${repo}"
           fi
-          # Clone into a fresh temp dir and move it in: the runner's working
-          # directory is not guaranteed empty, and `git clone .` fails with
-          # exit 128 if it isn't (this is what made the build job fail at 0s).
-          git clone "$url" .build
-          mv .build/* .build/.[!.]* . 2>/dev/null || true
-          rmdir .build 2>/dev/null || true
-          # The clone is on main: build the commit this run is for (push to main).
+          git clone "$url" .
+          # Build the commit this run is for (push to main).
           git checkout --detach "${{ forgejo.sha }}"
-      - name: Cross-compile for ${{ matrix.os }} ${{ matrix.arch }}
+      - name: Cross-compile all four release targets
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
+          GOPROXY: "off"
         run: |
           set -euo pipefail
           # No network: the standard library cross-compiler needs no downloads.
-          export GOPROXY=off
-          go build -o ${{ matrix.out }} .
-          ls -la ${{ matrix.out }}
-      - name: Stage the binary for release
+          mkdir -p release-binaries
+          GOOS=darwin GOARCH=arm64   go build -o release-binaries/garmin-sync        .
+          GOOS=linux  GOARCH=amd64   go build -o release-binaries/garmin-sync-linux-amd64        .
+          GOOS=linux  GOARCH=arm64   go build -o release-binaries/garmin-sync-linux-arm64        .
+          GOOS=windows GOARCH=amd64  go build -o release-binaries/garmin-sync-windows-amd64.exe  .
+          ls -la release-binaries
+      - name: Stage the binaries for release
         run: |
           set -euo pipefail
           # The desk runner's CI is custom and cannot be relied on to support
-          # actions/upload-artifact, so the built binary is pushed to the
+          # actions/upload-artifact, so the built binaries are pushed to the
           # release-binaries branch for the founder to download (see README).
-          mkdir -p release-binaries
-          cp "${{ matrix.out }}" "release-binaries/${{ matrix.out }}"
-          ls -la release-binaries
           git add release-binaries
           git -c user.name=developer -c user.email=developer@braintrust.internal \
-            commit -m "Release binary for ${{ matrix.os }} ${{ matrix.arch }}" || true
-          git push origin "release-binaries:release-binaries"
+            commit -m "Release binaries for darwin/arm64, linux/amd64, linux/arm64, windows/amd64"
+          git push --force origin HEAD:refs/heads/release-binaries
