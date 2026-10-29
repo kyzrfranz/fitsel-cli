@@ -58,6 +58,10 @@ const (
 var (
 	garminBaseURL = garmin.BaseURL
 	fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+
+	// The clients' retry/back-off delays default to their production values
+	// (2s upload / 30s back-off); tests point them at ~0 so the suite does not
+	// sleep real seconds. See the garmin and fitsel packages.
 )
 
 // version is set at release time by GoReleaser via -ldflags "-X main.version=...".
@@ -228,7 +232,9 @@ func runWithCtx(ctx context.Context, args []string) error {
 
 	gar := garmin.New(creds.GarminKey)
 	gar.SetBaseURL(garminBaseURL)
+	gar.RetryAfter = garmin.RetryAfterDelay
 	up := fitsel.New(*endpoint, creds.FitselToken, creds.FitselPasskey)
+	up.UploadDelay = fitsel.UploadDelayDelay
 
 	if _, err := gar.Authorize(ctx); err != nil {
 		return fmt.Errorf("authenticating with Garmin: %w", err)

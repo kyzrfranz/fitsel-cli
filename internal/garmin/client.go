@@ -47,14 +47,27 @@ var ErrRateLimited = errors.New("garmin: rate limited")
 // this is a safe default rather than an immediate retry (see the README).
 const defaultRetryAfter = 30 * time.Second
 
+// RetryAfterDelay is the production back-off when Garmin rate-limits a call
+// without a Retry-After header. It is a var, not a const, so tests can point it
+// at ~0 (see the README); production leaves it at its default of 30 seconds.
+var RetryAfterDelay = defaultRetryAfter
+
 // retryAfter parses a Retry-After header (Garmin's Personal API does not
 // document it) and returns how long to wait before giving up. It accepts the
 // two forms the HTTP spec allows — an absolute HTTP date or a number of
 // seconds — and falls back to a safe default when the header is missing or
 // unparseable, so a malformed header never triggers an immediate retry.
-func retryAfter(h string) time.Duration {
+func retryAfter(c *Client, h string) time.Duration {
 	if h == "" {
-		return defaultRetryAfter
+		// No Retry-After header: fall back to the client's configured back-off.
+		// A client may override defaultRetryAfter with its RetryAfter field
+		// (tests set it to ~0 so the back-off does not sleep real seconds); a
+		// zero value means "wait no time at all". Otherwise the production
+		// back-off (retryAfterDelay, 30 seconds by default) applies.
+		if c.RetryAfter > 0 {
+			return c.RetryAfter
+		}
+		return RetryAfterDelay
 	}
 	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && secs >= 0 {
 		return time.Duration(secs) * time.Second
@@ -76,12 +89,18 @@ type Client struct {
 	key     string
 	http    *http.Client
 
+	// RetryAfter is the back-off the client honours when Garmin rate-limits a
+	// call (a 429) without a Retry-After header. It defaults to 30 seconds
+	// (see New); a caller may override it — tests set it to ~0 so the back-off
+	// does not sleep real seconds. A zero value means "wait no time at all".
+	RetryAfter time.Duration
+
 	token AccessToken // set by Authorize; refreshed by bearer()
 }
 
 // New returns a client for the athlete's key.
 func New(key string) *Client {
-	return &Client{baseURL: BaseURL, key: key, http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{baseURL: BaseURL, key: key, http: &http.Client{Timeout: 30 * time.Second}, RetryAfter: defaultRetryAfter}
 }
 
 // SetBaseURL overrides the host; used by tests to point at the fake server.
@@ -262,7 +281,7 @@ func (c *Client) get(ctx context.Context, op, url string) (io.ReadCloser, error)
 		// Honour the run's context while waiting: a Ctrl-C bails out of the
 		// back-off instead of sitting through the whole window, and the run
 		// treats it as an interrupt rather than a rate limit.
-		timer := time.NewTimer(retryAfter(resp.Header.Get("Retry-After")))
+		timer := time.NewTimer(retryAfter(c, resp.Header.Get("Retry-After")))
 		select {
 		case <-ctx.Done():
 			timer.Stop()

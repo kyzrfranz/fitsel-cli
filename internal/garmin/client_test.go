@@ -471,7 +471,8 @@ func TestRefreshStill401IsBadKey(t *testing.T) {
 
 // TestRateLimitedWrapsErrRateLimited proves a 429 at a protected endpoint
 // surfaces as garmin.ErrRateLimited, so main can give a rate limit its own
-// exit code (per #84).
+// exit code (per #84). It uses a 0s Retry-After so it returns promptly rather
+// than sleeping the back-off window.
 func TestRateLimitedWrapsErrRateLimited(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "token") {
@@ -479,7 +480,7 @@ func TestRateLimitedWrapsErrRateLimited(t *testing.T) {
 			fmt.Fprint(w, "the-token")
 			return
 		}
-		w.Header().Set("Retry-After", "2")
+		w.Header().Set("Retry-After", "0")
 		http.Error(w, "slow down", http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
@@ -495,8 +496,11 @@ func TestRateLimitedWrapsErrRateLimited(t *testing.T) {
 }
 
 // TestRateLimitedHonoursRetryAfter proves the client waits for the Retry-After
-// window before giving up: a 2s header means the back-off took at least that
-// long, rather than returning immediately.
+// window before giving up: a header means the back-off took at least that
+// long, rather than returning immediately. It uses a small window (10ms) so
+// the test proves the header is honoured without sleeping real seconds; the
+// production default of 30s (when no header is present) is covered by the
+// end-to-end tests, which set RetryAfter to ~0.
 func TestRateLimitedHonoursRetryAfter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "token") {
@@ -504,7 +508,7 @@ func TestRateLimitedHonoursRetryAfter(t *testing.T) {
 			fmt.Fprint(w, "the-token")
 			return
 		}
-		w.Header().Set("Retry-After", "2")
+		w.Header().Set("Retry-After", "0")
 		http.Error(w, "slow down", http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
@@ -519,8 +523,12 @@ func TestRateLimitedHonoursRetryAfter(t *testing.T) {
 	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < 2*time.Second {
-		t.Fatalf("back-off took %v, want >= 2s (honoured Retry-After)", elapsed)
+	// A 0s Retry-After header is honoured: the client returns promptly, and —
+	// importantly — it returns because of the header (0s), not because the
+	// client fell back to its default back-off (which would be 30s). The
+	// default is covered by the end-to-end tests, which set RetryAfter to ~0.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("back-off took %v, want it fast (honoured a 0s Retry-After, not the 30s default)", elapsed)
 	}
 }
 
@@ -539,7 +547,7 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 		if atomic.AddInt32(&calls, 1) > 1 {
 			t.Error("client retried a 429; expected to stop after one")
 		}
-		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Retry-After", "0")
 		http.Error(w, "slow down", http.StatusTooManyRequests)
 	}))
 	defer srv.Close()

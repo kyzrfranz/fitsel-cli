@@ -17,6 +17,15 @@ import (
 	"time"
 )
 
+// newFastUploader returns an uploader with the retry delay set to ~0, so the
+// retry tests exercise the retry loop without sleeping real seconds. The
+// production default (two seconds) is unchanged; only the tests opt out of it.
+func newFastUploader(base, passkey string) *Client {
+	c := New(base, "", passkey)
+	c.UploadDelay = 0
+	return c
+}
+
 func TestUploadAccepted(t *testing.T) {
 	var gotSig string
 	var gotBody []byte
@@ -110,7 +119,7 @@ func TestUpload500RetriesThenExhausted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "", "passkey")
+	up := newFastUploader(srv.URL, "passkey")
 	accepted, err := up.Upload(context.Background(), []byte("FIT"))
 	if err == nil {
 		t.Fatal("expected an error after retries")
@@ -140,7 +149,7 @@ func TestUpload500RecoversOnRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "", "passkey")
+	up := newFastUploader(srv.URL, "passkey")
 	accepted, err := up.Upload(context.Background(), []byte("FIT"))
 	if err != nil {
 		t.Fatalf("expected a 202 after a transient 500, got %v", err)
@@ -185,7 +194,7 @@ func TestUploadDelayBailsOnCancel(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("retry delay took %v, want well under the %ds window (cancelled mid-wait)", elapsed, uploadDelay/time.Second)
+		t.Fatalf("retry delay took %v, want well under the %ds window (cancelled mid-wait)", elapsed, defaultUploadDelay/time.Second)
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Fatalf("attempts = %d, want 1 (a cancelled delay must not start a second attempt)", got)

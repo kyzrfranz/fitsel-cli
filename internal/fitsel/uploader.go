@@ -64,15 +64,27 @@ var (
 // without making a broken webhook wait long (see the README).
 const uploadAttempts = 3
 
-// uploadDelay is the fixed wait between upload attempts. A couple of seconds
-// lets a transient server error or network blip clear before the next try.
-const uploadDelay = 2 * time.Second
+// defaultUploadDelay is the fixed wait between upload attempts. A couple of
+// seconds lets a transient server error or network blip clear before the next
+// try. It is the default; a client may override it with its UploadDelay field
+// (tests set it to ~0 so the retry loop does not sleep real seconds).
+const defaultUploadDelay = 2 * time.Second
+
+// UploadDelayDelay is the production wait between upload attempts. It is a var,
+// not a const, so tests can point it at ~0 (see the README); production leaves
+// it at its default of two seconds.
+var UploadDelayDelay = defaultUploadDelay
 
 // Client uploads FIT files to a fitsel webhook.
 type Client struct {
 	webhookURL string
 	passkey    string
 	http       *http.Client
+	// UploadDelay is the wait between upload attempts on a retryable failure
+	// (500 / network). It defaults to two seconds (see New); a caller may set
+	// it to anything else — tests set it to ~0 so the retry loop does not sleep
+	// real seconds. A zero value means "wait no time at all".
+	UploadDelay time.Duration
 }
 
 // New returns an uploader for the athlete's webhook and passkey.
@@ -88,7 +100,7 @@ type Client struct {
 // https://ingest.fitsel.app/ingest/wh/<token>, and a full-URL token uploads to
 // exactly that URL.
 func New(base, token, passkey string) *Client {
-	return &Client{webhookURL: uploadURL(base, token), passkey: passkey, http: &http.Client{Timeout: 60 * time.Second}}
+	return &Client{webhookURL: uploadURL(base, token), passkey: passkey, http: &http.Client{Timeout: 60 * time.Second}, UploadDelay: defaultUploadDelay}
 }
 
 // uploadURL resolves the full upload URL from the base and the token, honouring
@@ -133,7 +145,10 @@ func (c *Client) Upload(ctx context.Context, fit []byte) (bool, error) {
 		lastErr = err
 		if attempt < uploadAttempts {
 			// Wait for the retry delay, but bail early if the caller stops.
-			timer := time.NewTimer(uploadDelay)
+			// An UploadDelay of zero means "no wait", which the tests set so
+			// the retry loop does not sleep real seconds; otherwise the
+			// production delay (two seconds by default) applies.
+			timer := time.NewTimer(c.UploadDelay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()

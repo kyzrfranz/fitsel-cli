@@ -32,6 +32,22 @@ func newActivities() []fakes.FakeActivity {
 	}
 }
 
+// useFastDelays points the clients' retry/back-off delays at ~0 so the suite
+// does not sleep real seconds (2s upload / 30s back-off in production). It
+// restores the production defaults on cleanup. Every end-to-end test that can
+// trigger a retry or a 429 calls it, so the whole suite runs in a few seconds.
+func useFastDelays(t *testing.T) {
+	t.Helper()
+	origUpload := fitsel.UploadDelayDelay
+	origBackoff := garmin.RetryAfterDelay
+	fitsel.UploadDelayDelay = 0
+	garmin.RetryAfterDelay = 0
+	t.Cleanup(func() {
+		fitsel.UploadDelayDelay = origUpload
+		garmin.RetryAfterDelay = origBackoff
+	})
+}
+
 // TestFirstRunUploadsEverything, SecondRunUploadsNothing is the walking skeleton's
 // headline check: against the fakes, a first run uploads every activity since
 // --since; a second run straight away uploads nothing.
@@ -118,6 +134,7 @@ func TestDryRunUploadsNothing(t *testing.T) {
 // kill is an error boundary — the first run stops on an upload error after the
 // first upload is accepted and marked done — rather than a real signal.
 func TestResumeAfterInterruptedSync(t *testing.T) {
+	useFastDelays(t)
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
@@ -321,6 +338,7 @@ func TestRefreshMidRunUploadsEverything(t *testing.T) {
 // #84): a run whose first protected call is rate-limited (429) backs off for
 // Retry-After and stops cleanly with its own exit code, uploading nothing.
 func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
+	useFastDelays(t)
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
@@ -444,6 +462,7 @@ func TestSyncPagesDryRunListsBeyondFirstPage(t *testing.T) {
 // boundary — the fake fails the first upload, the run stops, that activity is
 // not marked done, and the rerun finishes the rest across both pages.
 func TestSyncPagesResumeAfterInterruptedUpload(t *testing.T) {
+	useFastDelays(t)
 	const n = 150
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
@@ -921,6 +940,7 @@ func TestInvalidUploadIsPerActivityUploadsTheRest(t *testing.T) {
 // TestUploadExhaustedExitsFitselProves repeated 500s (or a dead network) exhaust
 // the retries, map to their own exit code, and mark nothing synced (per #85).
 func TestUploadExhaustedExitsFitselAndUploadsNothing(t *testing.T) {
+	useFastDelays(t)
 	dir := t.TempDir()
 	fits := fakes.NewFakeFitsel("test-passkey")
 	// Fail every attempt: the run retries (3 total) then gives up.
@@ -1999,6 +2019,7 @@ func TestFitselUploadDelayBailsEarlyOnCancel(t *testing.T) {
 // returns ctx.Err() instead of sitting through the full Retry-After window when
 // the context is cancelled.
 func TestGarminRateLimitClientBailsEarly(t *testing.T) {
+	useFastDelays(t)
 	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
 	gar.RateLimitOnce = true // Retry-After: 2s
 	defer gar.Close()
