@@ -592,6 +592,70 @@ func TestSkipAfterThresholdFailures(t *testing.T) {
 	}
 }
 
+// TestSkipListedInRunSummary proves the end-of-run summary actually prints the
+// skipped activity's id: the acceptance criterion is user-visible output, so
+// this captures stdout on runs that leave 1001 skipped and asserts the id is
+// on the "skipped %d activity(ies)" line, not just in the persisted state.
+func TestSkipListedInRunSummary(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+
+	// Capture stdout for the whole test, then restore it.
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	// 1001 fails its upload once per run (per-activity); the other two upload
+	// clean. After three runs its count reaches the threshold and it is skipped.
+	// The summary line that lists the skipped id is printed on the third run,
+	// so it is read after the loop.
+	var skippedLine string
+	for attempt := 1; attempt <= 3; attempt++ {
+		fits.FailNextQueued(http.StatusBadRequest)
+		if err := run(args); err == nil {
+			t.Fatalf("run %d: expected a partial-failure error", attempt)
+		}
+		// Read only up to this run's output; the final read below gets the
+		// summary line that run 3 printed.
+		w.Close()
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		if strings.Contains(buf.String(), "skipped") {
+			skippedLine = buf.String()
+		}
+		r, w, err = os.Pipe()
+		os.Stdout = w
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if skippedLine == "" {
+		t.Fatal("no run printed a skip summary line")
+	}
+	if !strings.Contains(skippedLine, "skipped 1 activity(ies)") {
+		t.Fatalf("summary missing the skip count line; got:\n%s", skippedLine)
+	}
+	if !strings.Contains(skippedLine, "1001") {
+		t.Fatalf("summary does not list the skipped activity id 1001; got:\n%s", skippedLine)
+	}
+}
+
 // TestSkipCountPersistsAcrossRuns proves the fail count that drives the skip is
 // persisted with the rest of the state: a run that fails an activity once,
 // then reloads, keeps counting toward the skip rather than restarting at zero.
