@@ -68,60 +68,16 @@ jobs:
           go build ./...
           go vet ./...
           go test ./...
-  build:
-    # Cross-compile the release binaries for every supported platform,
-    # on every merge to main (ADR 0067). Publishes them untagged on the
-    # release-binaries branch, so the founder can tag and publish v1.
-    #
-    # One job (not a matrix): the matrix pushed from a detached HEAD to a
-    # branch that did not exist locally, and four jobs collided on one branch.
-    # A single job cross-compiles all four targets, stages them, commits once,
-    # and pushes with `--force HEAD:refs/heads/release-binaries` (safe on the
-    # detached HEAD the desk runner leaves us on).
-    if: github.ref == 'refs/heads/main'
-    needs: check
-    runs-on: desk
-    steps:
-      - name: Checkout repository
-        run: |
-          set -euo pipefail
-          token="${{ forgejo.token }}"
-          # server_url also carries the project path (e.g. /braintrust), so
-          # strip to the first path segment: a host ending in /project makes
-          # the clone URL .../project/project/repo.git -> "not found".
-          server_url="${{ forgejo.server_url }}"
-          host="${server_url#https://}"
-          host="${host#http://}"
-          host="${host%%/*}"
-          repo="${{ forgejo.repository }}"
-          if [ -n "$token" ]; then
-            url="https://x-access-token:${token}@${host}/${repo}.git"
-          else
-            url="https://${host}/${repo}"
-          fi
-          git clone "$url" .
-          # Build the commit this run is for (push to main).
-          git checkout --detach "${{ forgejo.sha }}"
-      - name: Cross-compile all four release targets
+      - name: Cross-compile smoke check
         env:
           CGO_ENABLED: "0"
           GOPROXY: "off"
         run: |
           set -euo pipefail
-          # No network: the standard library cross-compiler needs no downloads.
-          mkdir -p release-binaries
-          GOOS=darwin GOARCH=arm64   go build -o release-binaries/garmin-sync        .
-          GOOS=linux  GOARCH=amd64   go build -o release-binaries/garmin-sync-linux-amd64        .
-          GOOS=linux  GOARCH=arm64   go build -o release-binaries/garmin-sync-linux-arm64        .
-          GOOS=windows GOARCH=amd64  go build -o release-binaries/garmin-sync-windows-amd64.exe  .
-          ls -la release-binaries
-      - name: Stage the binaries for release
-        run: |
-          set -euo pipefail
-          # The desk runner's CI is custom and cannot be relied on to support
-          # actions/upload-artifact, so the built binaries are pushed to the
-          # release-binaries branch for the founder to download (see README).
-          git add release-binaries
-          git -c user.name=developer -c user.email=developer@braintrust.internal \
-            commit -m "Release binaries for darwin/arm64, linux/amd64, linux/arm64, windows/amd64"
-          git push --force origin HEAD:refs/heads/release-binaries
+          # No network, output discarded: this only checks the standard-library
+          # cross-compiler still builds for each supported platform. Public
+          # releases ship via GoReleaser on the GitHub mirror, not here.
+          GOOS=darwin   GOARCH=arm64   go build -o /dev/null .
+          GOOS=linux    GOARCH=amd64   go build -o /dev/null .
+          GOOS=linux    GOARCH=arm64   go build -o /dev/null .
+          GOOS=windows  GOARCH=amd64   go build -o /dev/null .
