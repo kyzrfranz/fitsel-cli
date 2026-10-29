@@ -595,3 +595,64 @@ func TestRateLimitedBailsOnCancel(t *testing.T) {
 		t.Fatalf("back-off took %v, want well under the 30s window (cancelled mid-wait)", elapsed)
 	}
 }
+
+// TestDownloadTransportFailureNamesDownloading proves a Download that fails at
+// the transport layer wraps the error with its own operation name ("downloading
+// activity <id>"), not the List's "listing activities". This is the bug this
+// fix addresses: get() used to hard-code "listing activities" for every caller.
+func TestDownloadTransportFailureNamesDownloading(t *testing.T) {
+	// A server that is closed before the request, so http.Do fails at the
+	// transport layer (connection refused) rather than returning an HTTP status.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "the-token")
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	srv.Close() // now the protected call fails at the transport layer
+
+	_, err := c.Download(context.Background(), 1001)
+	if err == nil {
+		t.Fatal("expected a download error")
+	}
+	if !strings.Contains(err.Error(), "downloading activity 1001") {
+		t.Fatalf("download error = %q, want it to name downloading activity 1001", err)
+	}
+	if strings.Contains(err.Error(), "listing activities") {
+		t.Fatalf("download error must not be labelled listing activities: %q", err)
+	}
+}
+
+// TestListTransportFailureStillListsActivities proves a List that fails at the
+// transport layer still reports "listing activities": the operation name is
+// per-caller, and List keeps its name. This asserts List's behaviour is
+// unchanged by the per-operation fix.
+func TestListTransportFailureStillListsActivities(t *testing.T) {
+	// A server that is closed before the request, so http.Do fails at the
+	// transport layer (connection refused) rather than returning an HTTP status.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "the-token")
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	srv.Close() // now the protected call fails at the transport layer
+
+	_, err := c.List(context.Background(), "2026-10-01", "")
+	if err == nil {
+		t.Fatal("expected a list error")
+	}
+	if !strings.Contains(err.Error(), "listing activities") {
+		t.Fatalf("list error = %q, want it to name listing activities", err)
+	}
+}
