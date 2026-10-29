@@ -93,7 +93,7 @@ func run(args []string) error {
 		return initCommand(os.Stdin, os.Stdout, args[1:])
 	}
 
-	fs := flag.NewFlagSet("garmin-sync", flag.ContinueOnError)
+	fs := flag.NewFlagSet("fitsel-client", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
 	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
@@ -104,7 +104,7 @@ func run(args []string) error {
 		return err
 	}
 	if *showVersion {
-		fmt.Println("garmin-sync", version)
+		fmt.Println("fitsel-client", version)
 		return nil
 	}
 

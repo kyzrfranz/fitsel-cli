@@ -2,10 +2,10 @@
 # binaries, publishes a GitHub Release and updates the Homebrew tap. Run by
 # .github/workflows/release.yml on a v* tag.
 version: 2
-project_name: garmin-sync
+project_name: fitsel-client
 
 builds:
-  - binary: garmin-sync
+  - binary: fitsel-client
     env:
       - CGO_ENABLED=0
     goos: [darwin, linux, windows]
@@ -33,7 +33,7 @@ changelog:
   sort: asc
 
 homebrew_casks:
-  - name: garmin-sync
+  - name: fitsel-client
     repository:
       owner: kyzrfranz
       name: homebrew-tap
@@ -46,5 +46,5 @@ homebrew_casks:
       post:
         install_steps: |
           on_macos do
-            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/garmin-sync"]
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/fitsel-client"]
           end
