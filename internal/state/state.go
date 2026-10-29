@@ -62,11 +62,17 @@ type State struct {
 const skipThreshold = 3
 
 // Load reads the state file, returning an empty state if it does not exist.
+//
+// An empty path is not "no state": it resolves to the default location, so a
+// run that never passes --state still reads and, on Save, writes the documented
+// ~/.config/garmin-sync/state.json. That is what makes repeated runs idempotent
+// by default (per #127): before this, Load("") returned a state whose Save() was
+// a no-op, so the state file was never written and every run re-uploaded.
 func Load(path string) (*State, error) {
-	s := &State{synced: map[string]bool{}, fails: map[string]int{}, skips: map[string]bool{}, path: path, SkipThreshold: skipThreshold}
 	if path == "" {
-		return s, nil
+		path = Path()
 	}
+	s := &State{synced: map[string]bool{}, fails: map[string]int{}, skips: map[string]bool{}, path: path, SkipThreshold: skipThreshold}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

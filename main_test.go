@@ -1719,3 +1719,55 @@ func TestDoctorInitOfferNoSecret(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultStatePathIsUsedWithoutStateFlag is the acceptance check for #127:
+// with no -state flag, the run reads and writes the default
+// ~/.config/garmin-sync/state.json, so a second run uploads nothing. HOME is
+// pointed at a temp dir so the default path lands in a throwaway location; the
+// tool is driven exactly as an athlete would run it, with no -state at all.
+func TestDefaultStatePathIsUsedWithoutStateFlag(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("FITSEL_STATE", "") // ensure the default path is used, not $FITSEL_STATE
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// No -state: the run must use the documented default path.
+	args := []string{"-since", "2026-10-01", "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+
+	// First run: uploads everything.
+	if err := run(args); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("first run uploaded %d, want 3", len(fits.Uploadees))
+	}
+
+	// The default state file must have been written next to the config dir.
+	wantPath := filepath.Join(dir, ".config", "garmin-sync", "state.json")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("default state file not written at %s: %v", wantPath, err)
+	}
+
+	// Second run straight away: everything is already marked synced, so nothing
+	// is uploaded — the idempotency the default state file gives.
+	if err := run(args); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("second run uploaded %d extra files; expected nothing (state not persisted by default)", len(fits.Uploadees)-3)
+	}
+}
