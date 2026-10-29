@@ -71,9 +71,21 @@ The tool uploads to your fitsel upload webhook. Get the credentials for it here:
 3. Paste the token into `FITSEL_TOKEN` and the passkey into `FITSEL_PASSKEY`
    (see [Configure](#configure)).
 
-The tool sends uploads to `https://ingest.fitsel.app/ingest/wh` by default; your
-token and passkey are embedded in the webhook URL you copied, so you do not need
-to touch that URL unless you want to override it (see `--fitsel-endpoint`).
+The tool sends uploads to `https://ingest.fitsel.app/ingest/wh/<token>` by
+default — your token is appended to that base, so the upload lands on your
+account's webhook. Your token and passkey are embedded in the webhook URL you
+copied, so you do not need to touch that URL unless you want to override the
+base (see `--fitsel-endpoint`).
+
+The token accepts two forms, paste whichever is easiest:
+
+- **A bare token** (the short string on the setup page): it is appended to the
+  base, so the upload goes to `https://ingest.fitsel.app/ingest/wh/<token>`.
+- **A full webhook URL** (starting with `https://`): it is used as-is, so the
+  upload goes to exactly the URL you pasted.
+
+`--fitsel-endpoint` overrides only the base, never the token: a bare token still
+appends to it, and a full-URL token still overrides it entirely.
 
 ## Configure
 
@@ -150,8 +162,9 @@ When the list looks right, run it again without `--dry-run` to upload.
   at the old 100-activity cap.
 - `--state <path>` — where to keep the state file (which activities are synced).
   Default: `~/.config/garmin-sync/state.json`.
-- `--fitsel-endpoint <url>` — the fitsel webhook base URL. Default:
-  `https://ingest.fitsel.app/ingest/wh`.
+- `--fitsel-endpoint <url>` — the fitsel webhook base URL. The upload goes to
+  `<base>/<FITSEL_TOKEN>`, so this overrides only the base, never the token.
+  Default: `https://ingest.fitsel.app/ingest/wh`.
 - `--skip-threshold <N>` — how many times an activity may fail to sync before it
   is skipped. Default: `3`. Pass `0` to disable the skip and retry every
   failing activity forever.

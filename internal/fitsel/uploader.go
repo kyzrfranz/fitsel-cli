@@ -2,7 +2,8 @@
 // fixed upload contract given in the pitch. This contract is not to be changed.
 //
 // Contract:
-//   - POST https://ingest.fitsel.app/ingest/wh/<webhook-token>
+//   - POST <base>/<webhook-token>, base defaulting to
+//     https://ingest.fitsel.app/ingest/wh
 //   - Body: multipart/form-data with the FIT in a part named "fit"
 //     ("file" and "activity" are also accepted). An optional "metadata" part
 //     (JSON) is logged and otherwise ignored.
@@ -27,6 +28,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -73,8 +75,28 @@ type Client struct {
 }
 
 // New returns an uploader for the athlete's webhook and passkey.
-func New(webhookURL, passkey string) *Client {
-	return &Client{webhookURL: webhookURL, passkey: passkey, http: &http.Client{Timeout: 60 * time.Second}}
+//
+// base is the fitsel webhook base URL (the part --fitsel-endpoint overrides);
+// the upload goes to base/<token>. token is the athlete's FITSEL_TOKEN, which
+// may be pasted either as a bare webhook token or as a full webhook URL:
+//
+//   - if token starts with "https://", it is used as the full upload URL as-is;
+//   - otherwise it is appended to base, giving base + "/" + token.
+//
+// So a bare token with the default base uploads to
+// https://ingest.fitsel.app/ingest/wh/<token>, and a full-URL token uploads to
+// exactly that URL.
+func New(base, token, passkey string) *Client {
+	return &Client{webhookURL: uploadURL(base, token), passkey: passkey, http: &http.Client{Timeout: 60 * time.Second}}
+}
+
+// uploadURL resolves the full upload URL from the base and the token, honouring
+// the two forms a token may be pasted in (a bare token, or a full URL).
+func uploadURL(base, token string) string {
+	if strings.HasPrefix(token, "https://") {
+		return token
+	}
+	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(token, "/")
 }
 
 // Upload sends a FIT file and reports whether fitsel accepted it (202). It
