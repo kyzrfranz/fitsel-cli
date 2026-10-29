@@ -46,6 +46,9 @@ var (
 	fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 )
 
+// version is set at release time by GoReleaser via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		exitError(err, os.Exit)
@@ -96,8 +99,13 @@ func run(args []string) error {
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
 	statePath := fs.String("state", "", "path to the state file (default: ~/.config/garmin-sync/state.json)")
 	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		fmt.Println("garmin-sync", version)
+		return nil
 	}
 
 	if _, err := parseDate(*since); err != nil {
