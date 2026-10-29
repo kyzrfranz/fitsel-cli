@@ -195,7 +195,7 @@ func TestBadKeyExitsGarmin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a run error on a bad key")
 	}
-	if got := mapGarminExit(err); got != exitGarmin {
+	if got := mapExitCode(err); got != exitGarmin {
 		t.Fatalf("exit code = %d, want %d (bad key)", got, exitGarmin)
 	}
 	if len(fits.Uploadees) != 0 {
@@ -206,14 +206,51 @@ func TestBadKeyExitsGarmin(t *testing.T) {
 // TestNonGarminErrorStaysGeneral proves the generic error path is untouched: a
 // state-load failure maps to exitGeneral (1), not the Garmin codes.
 func TestNonGarminErrorStaysGeneral(t *testing.T) {
-	if got := mapGarminExit(errors.New("some other failure")); got != exitGeneral {
+	if got := mapExitCode(errors.New("some other failure")); got != exitGeneral {
 		t.Fatalf("exit code = %d, want %d (general)", got, exitGeneral)
+	}
+}
+
+// TestMissingCredentialsExitConfig proves a missing credential maps to
+// exitConfig (2), not the general error code (per #134). The run stops before
+// any activity is attempted, so the athlete gets the code that tells them to
+// fix their configuration, not a generic failure.
+func TestMissingCredentialsExitConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FITSEL_CONFIG", filepath.Join(dir, "config.json"))
+	// No secrets set, and a writable config dir: Load writes a placeholder and
+	// returns ErrMissingCredentials.
+	_, err := config.Load()
+	if !errors.Is(err, config.ErrMissingCredentials) {
+		t.Fatalf("expected ErrMissingCredentials, got %v", err)
+	}
+	if got := mapExitCode(err); got != exitConfig {
+		t.Fatalf("exit code = %d, want %d (config)", got, exitConfig)
+	}
+}
+
+// TestUnreadableConfigExitConfig proves an unreadable config file maps to
+// exitConfig (2), not the general error code (per #134).
+func TestUnreadableConfigExitConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	// A file that exists but is not valid JSON yields ErrConfigUnreadable.
+	if err := os.WriteFile(cfg, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FITSEL_CONFIG", cfg)
+	_, err := config.Load()
+	if !errors.Is(err, config.ErrConfigUnreadable) {
+		t.Fatalf("expected ErrConfigUnreadable, got %v", err)
+	}
+	if got := mapExitCode(err); got != exitConfig {
+		t.Fatalf("exit code = %d, want %d (config)", got, exitConfig)
 	}
 }
 
 // TestErrorPrintedOnStderr proves main()'s error path still prints the one-line
 // `error:` message the task asks for (per #84). The exit-code tests call
-// mapGarminExit directly and never see main()'s stderr, so this exercises the
+// mapExitCode directly and never see main()'s stderr, so this exercises the
 // print-and-exit contract directly: it must print `error: <msg>` and exit with
 // the mapped code. A swallowed error print would be a silent failure an athlete
 // can't act on. exitError takes its exit function as an argument, so we can
@@ -299,7 +336,7 @@ func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a run error on a rate limit")
 	}
-	if got := mapGarminExit(err); got != exitRateLimited {
+	if got := mapExitCode(err); got != exitRateLimited {
 		t.Fatalf("exit code = %d, want %d (rate limited)", got, exitRateLimited)
 	}
 	// The run stopped at List, before any download or upload: nothing transferred.
@@ -487,7 +524,7 @@ func TestBadSignatureExitsFitselAndUploadsNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an upload error on a bad signature")
 	}
-	if got := mapGarminExit(err); got != exitBadSignature {
+	if got := mapExitCode(err); got != exitBadSignature {
 		t.Fatalf("exit code = %d, want %d (bad signature)", got, exitBadSignature)
 	}
 	if len(fits.Uploadees) != 0 {
@@ -514,7 +551,7 @@ func TestUnknownWebhookExitsFitselAndUploadsNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an upload error on an unknown webhook token")
 	}
-	if got := mapGarminExit(err); got != exitWebhookMissing {
+	if got := mapExitCode(err); got != exitWebhookMissing {
 		t.Fatalf("exit code = %d, want %d (unknown webhook token)", got, exitWebhookMissing)
 	}
 	if len(fits.Uploadees) != 0 {
@@ -868,7 +905,7 @@ func TestInvalidUploadIsPerActivityUploadsTheRest(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a partial-failure error on a malformed upload")
 	}
-	if got := mapGarminExit(err); got != exitPartialFailure {
+	if got := mapExitCode(err); got != exitPartialFailure {
 		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
 	}
 	if len(fits.Uploadees) != 2 {
@@ -892,7 +929,7 @@ func TestUploadExhaustedExitsFitselAndUploadsNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an upload error after the retries are exhausted")
 	}
-	if got := mapGarminExit(err); got != exitUploadExhausted {
+	if got := mapExitCode(err); got != exitUploadExhausted {
 		t.Fatalf("exit code = %d, want %d (upload exhausted)", got, exitUploadExhausted)
 	}
 	if len(fits.Uploadees) != 0 {
@@ -1239,7 +1276,7 @@ func TestOneFailedActivityUploadsTheRest(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a partial-failure error when one activity fails")
 	}
-	if got := mapGarminExit(err); got != exitPartialFailure {
+	if got := mapExitCode(err); got != exitPartialFailure {
 		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
 	}
 	// The other two activities were uploaded despite the first one failing.
@@ -1286,7 +1323,7 @@ func TestFailedUploadSkipsRest(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a partial-failure error when an activity fails")
 	}
-	if got := mapGarminExit(err); got != exitPartialFailure {
+	if got := mapExitCode(err); got != exitPartialFailure {
 		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
 	}
 	// The other two activities were still sent.
@@ -1312,7 +1349,7 @@ func TestRunWideUploadErrorStillAborts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a run-wide error on a bad signature")
 	}
-	if got := mapGarminExit(err); got != exitBadSignature {
+	if got := mapExitCode(err); got != exitBadSignature {
 		t.Fatalf("exit code = %d, want %d (bad signature, run-wide)", got, exitBadSignature)
 	}
 	if len(fits.Uploadees) != 0 {
@@ -1375,7 +1412,7 @@ func TestDoctorAllChecksPass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doctor: %v\nREPORT:\n%s", err, out.String())
 	}
-	// A passing doctor run returns nil (exit 0); mapGarminExit(nil) is not 0
+	// A passing doctor run returns nil (exit 0); mapExitCode(nil) is not 0
 	// (nil falls through to the general code), so assert the nil directly.
 	if err != nil {
 		t.Fatalf("doctor returned non-nil error on a passing run: %v", err)
@@ -1425,7 +1462,7 @@ func TestDoctorBadKeyExitsNonZero(t *testing.T) {
 	}
 	// Any non-zero exit is acceptable per the acceptance (exit 0 only if all
 	// pass); a bad key is a general failure here.
-	if got := mapGarminExit(err); got == exitOK {
+	if got := mapExitCode(err); got == exitOK {
 		t.Fatalf("exit code = %d, want non-zero (bad key)", got)
 	}
 	report := out.String()
@@ -1689,7 +1726,7 @@ func TestDoctorThenEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doctor: %v\nREPORT:\n%s", err, out.String())
 	}
-	// A passing doctor run returns nil (exit 0); mapGarminExit(nil) is not 0
+	// A passing doctor run returns nil (exit 0); mapExitCode(nil) is not 0
 	// (nil falls through to the general code), so assert the nil directly.
 	if err != nil {
 		t.Fatalf("doctor returned non-nil error on a passing run: %v", err)
