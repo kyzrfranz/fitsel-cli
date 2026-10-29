@@ -420,6 +420,36 @@ func TestRefreshOn401(t *testing.T) {
 	}
 }
 
+// TestRefreshThenStill401IsBadKey proves a protected call that 401s, refreshes
+// once, and 401s again on the retried call is a bad key (ErrBadKey), not a raw
+// status: the refreshed token was rejected too, so the key itself is bad. This
+// is the post-refresh 401 (#137) — main maps it to its own exit code (3).
+func TestRefreshThenStill401IsBadKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "fresh-token")
+			return
+		}
+		// Every protected call 401s, even after the refresh: the key is bad.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New("test-garmin-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	// Force the first protected call to 401 so the client refreshes.
+	c.token.token = "stale"
+
+	_, err := c.List(context.Background(), "2026-10-01", "")
+	if !errors.Is(err, ErrBadKey) {
+		t.Fatalf("expected ErrBadKey when the retried call 401s after a refresh, got %v", err)
+	}
+}
+
 // TestRefreshStill401IsBadKey proves a refresh that 401s again is a bad key,
 // not a transient token problem: the key itself is rejected.
 func TestRefreshStill401IsBadKey(t *testing.T) {

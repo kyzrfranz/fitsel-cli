@@ -266,6 +266,7 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 		resp.Body.Close()
 		tok, err := c.refresh(ctx)
 		if err != nil {
+			// A refresh that 401s means the key is bad, not the token.
 			return nil, err
 		}
 		c.token = tok
@@ -273,6 +274,12 @@ func (c *Client) get(ctx context.Context, url string) (io.ReadCloser, error) {
 		resp, err = c.http.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("listing activities: %w", err)
+		}
+		// The refreshed token was rejected too: the key itself is bad, not
+		// just the token, so surface it as ErrBadKey rather than a raw status.
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			return nil, ErrBadKey
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
