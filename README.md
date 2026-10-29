@@ -1,4 +1,4 @@
-# garmin-sync
+# fitsel-client
 
 A client the athlete runs on their own machine. Each run it uses the athlete's
 Garmin Personal API key to fetch the activities they have not synced yet as FIT
@@ -11,20 +11,46 @@ run and no refresh token to manage — the key stays on the athlete's machine.
 
 ## Setup
 
-Follow these five steps in order:
+Follow these six steps in order:
 
-1. [Create the Garmin key](#1-create-the-garmin-key)
-2. [Get the fitsel token and passkey](#2-get-the-fitsel-token-and-passkey)
-3. [Configure](#configure)
-4. [Run](#run)
-5. [Schedule on each OS](#schedule)
+1. [Install](#1-install)
+2. [Create the Garmin key](#2-create-the-garmin-key)
+3. [Get the fitsel token and passkey](#3-get-the-fitsel-token-and-passkey)
+4. [Configure](#configure)
+5. [Run](#run)
+6. [Schedule on each OS](#schedule)
 
-## 1. Create the Garmin key
+## 1. Install
+
+### Homebrew (macOS and Linux)
+
+```sh
+brew install kyzrfranz/tap/fitsel-client
+fitsel-client --version
+```
+
+Upgrade to a newer release with `brew upgrade fitsel-client`.
+
+### Download a release
+
+Every release is published at
+<https://github.com/kyzrfranz/fitsel-cli/releases> with an archive for each
+platform (macOS, Linux and Windows; amd64 and arm64) and a `checksums.txt`.
+Download the one for your platform, unpack it, and put `fitsel-client` (or
+`fitsel-client.exe` on Windows) somewhere on your `PATH`.
+
+### Build from source
+
+```sh
+go build -o fitsel-client .
+```
+
+## 2. Create the Garmin key
 
 The tool needs a Garmin Personal API key. Create one here:
 
 1. Go to <https://developer.garmin.com/> and sign in with your Garmin account.
-2. **My Apps** → **Create App**. Give it a name, e.g. `garmin-sync`.
+2. **My Apps** → **Create App**. Give it a name, e.g. `fitsel-client`.
 3. On the app's page, under **Personal API Keys**, click **Create Personal API Key**.
    A `client_id` (the key) and a `client_secret` are generated.
 4. Copy the **client id** — that is the key the tool needs. Paste it into
@@ -34,7 +60,7 @@ The key lasts about 24 hours. It never needs a refresh token *because* it stays 
 the athlete's machine — there is no server to hold one. When it expires, just
 create a new one at the same page and paste it in.
 
-## 2. Get the fitsel token and passkey
+## 3. Get the fitsel token and passkey
 
 The tool uploads to your fitsel upload webhook. Get the credentials for it here:
 
@@ -56,15 +82,15 @@ file second — an environment variable wins over the file for each key:
 
 | Variable | Used for |
 |---|---|
-| `GARMIN_API_KEY` | Your Garmin Personal API key (see [Create the Garmin key](#1-create-the-garmin-key)). |
-| `FITSEL_TOKEN` | Your fitsel upload token (see [Get the fitsel token and passkey](#2-get-the-fitsel-token-and-passkey)). |
-| `FITSEL_PASSKEY` | Your fitsel upload passkey (see [Get the fitsel token and passkey](#2-get-the-fitsel-token-and-passkey)). |
+| `GARMIN_API_KEY` | Your Garmin Personal API key (see [Create the Garmin key](#2-create-the-garmin-key)). |
+| `FITSEL_TOKEN` | Your fitsel upload token (see [Get the fitsel token and passkey](#3-get-the-fitsel-token-and-passkey)). |
+| `FITSEL_PASSKEY` | Your fitsel upload passkey (see [Get the fitsel token and passkey](#3-get-the-fitsel-token-and-passkey)). |
 
 If any are missing, the tool writes a sample config file at the path below so
 you know where to put them. Secrets are never logged or printed.
 
 The config file lives at `~/.config/garmin-sync/config.json` (on Linux and
-macOS), mode `0600` (readable only by you); its directory is mode `0700`. Set
+macOS; the directory keeps the tool's earlier name), mode `0600` (readable only by you); its directory is mode `0700`. Set
 `FITSEL_CONFIG` to use a different file. Edit it by hand:
 
 ```json
@@ -79,7 +105,7 @@ clear error naming the file — fix it, and the run will proceed.
 ## Run
 
 ```sh
-garmin-sync --since 2026-01-01
+fitsel-client --since 2026-01-01
 ```
 
 The first run needs `--since` to set your start date. Each later run uploads
@@ -92,7 +118,7 @@ It lists the pending activities and uploads nothing — no files are downloaded
 from Garmin, nothing is sent to fitsel, and nothing is marked synced:
 
 ```sh
-garmin-sync --since 2026-01-01 --dry-run
+fitsel-client --since 2026-01-01 --dry-run
 ```
 
 It prints something like:
@@ -136,25 +162,30 @@ crontab -e
 ```
 
 ```
-0 20 * * * /usr/local/bin/garmin-sync --since 2026-01-01 >> ~/.config/garmin-sync/sync.log 2>&1
+0 20 * * * /opt/homebrew/bin/fitsel-client --since 2026-01-01 >> ~/.config/garmin-sync/sync.log 2>&1
 ```
+
+Use the full path to the binary, since cron does not load your shell's `PATH`.
+`which fitsel-client` prints it: `/opt/homebrew/bin/fitsel-client` for Homebrew
+on Apple Silicon, `/usr/local/bin/fitsel-client` on Intel Macs,
+`/home/linuxbrew/.linuxbrew/bin/fitsel-client` for Homebrew on Linux.
 
 Or a systemd timer on Linux:
 
 ```ini
-# ~/.config/systemd/user/garmin-sync.service
+# ~/.config/systemd/user/fitsel-client.service
 [Unit]
-Description=garmin-sync
+Description=fitsel-client
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/garmin-sync --since 2026-01-01
+ExecStart=/home/linuxbrew/.linuxbrew/bin/fitsel-client --since 2026-01-01
 ```
 
 ```ini
-# ~/.config/systemd/user/garmin-sync.timer
+# ~/.config/systemd/user/fitsel-client.timer
 [Unit]
-Description=garmin-sync daily
+Description=fitsel-client daily
 
 [Timer]
 OnCalendar=*-*-* 20:00:00
@@ -165,7 +196,7 @@ WantedBy=default.target
 ```
 
 ```sh
-systemctl --user enable --now garmin-sync.timer
+systemctl --user enable --now fitsel-client.timer
 ```
 
 ### Windows (Task Scheduler)
@@ -173,7 +204,7 @@ systemctl --user enable --now garmin-sync.timer
 On Windows, create a daily task in Task Scheduler. From a command prompt:
 
 ```bat
-schtasks /create /tn "garmin-sync" /tr "C:\path\to\garmin-sync-windows-amd64.exe --since 2026-01-01" /sc daily /st 20:00
+schtasks /create /tn "fitsel-client" /tr "C:\path\to\fitsel-client.exe --since 2026-01-01" /sc daily /st 20:00
 ```
 
 Run it daily after you've trained. A run exits `0` on success, or a non-zero code
@@ -198,35 +229,36 @@ More codes are added as features land (uploads). This list grows with them.
 
 ## Releases
 
-A binary for every supported platform is produced automatically on every merge
-to `main`, as this repo's CI (`.forgejo/workflows/ci.yml`). Each merge
-cross-compiles all four targets and pushes them to the `release-binaries`
-branch, untagged, ready to go:
+Releases are published from the public GitHub mirror,
+[kyzrfranz/fitsel-cli](https://github.com/kyzrfranz/fitsel-cli). Pushing a `v*`
+tag there runs `.github/workflows/release.yml`, which runs the tests and then
+[GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) to:
 
-| File | Platform |
-|---|---|
-| `garmin-sync-darwin-arm64` | macOS, Apple Silicon (M1/M2/M3/M4) |
-| `garmin-sync-linux-amd64` | Linux, 64-bit x86 |
-| `garmin-sync-linux-arm64` | Linux, 64-bit ARM (e.g. Raspberry Pi) |
-| `garmin-sync-windows-amd64.exe` | Windows, 64-bit x86 |
+- build `fitsel-client` for macOS, Linux and Windows (amd64 and arm64),
+- publish them as a GitHub Release with a `checksums.txt`,
+- update the `fitsel-client` cask in
+  [kyzrfranz/homebrew-tap](https://github.com/kyzrfranz/homebrew-tap).
 
-To get one: check out the `release-binaries` branch, take the file for your
-platform, rename it `garmin-sync` (drop the platform suffix, and the `.exe` on
-Windows), make it executable (`chmod +x garmin-sync` on Linux/macOS), and run
-it as under "Run".
-
-The binaries are cross-compiled from a single Go source tree with the standard
-library cross-compiler (`CGO_ENABLED=0 GOOS=… GOARCH=… go build`), so there is
-no third-party toolchain to install.
-
-Build one yourself, to test without merging, from a checkout of `main`:
+To cut a release, from an up-to-date `main`:
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o garmin-sync-linux-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o garmin-sync-linux-arm64 .
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o garmin-sync-darwin-arm64 .
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o garmin-sync-windows-amd64.exe .
+git push public main
+git tag -a v0.1.0 -m "v0.1.0"
+git push public v0.1.0
 ```
 
-The founder chooses the licence and tags/publishes v1 from these staged binaries;
-CI never creates a git tag or a release.
+The workflow needs the `HOMEBREW_TAP_TOKEN` secret on `kyzrfranz/fitsel-cli`: a
+fine-grained token with Contents read/write on `kyzrfranz/homebrew-tap`.
+
+Try a release locally without publishing anything:
+
+```sh
+goreleaser release --snapshot --clean   # output in dist/
+```
+
+### Internal builds
+
+Separately, the Forgejo CI (`.forgejo/workflows/ci.yml`) cross-compiles a binary
+on every merge to `main` and pushes it to the `release-binaries` branch,
+untagged. Those files still carry the old `garmin-sync-*` names; rename the one
+for your platform to `fitsel-client` before use.

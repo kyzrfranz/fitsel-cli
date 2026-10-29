@@ -1,4 +1,4 @@
-// Command garmin-sync is a client the athlete runs on their own machine: each
+// Command fitsel-client is a client the athlete runs on their own machine: each
 // run it uses the athlete's Garmin Personal API key to fetch the activities
 // they have not synced yet as FIT files, and uploads each one to the athlete's
 // fitsel upload webhook.
@@ -46,6 +46,9 @@ var (
 	fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 )
 
+// version is set at release time by GoReleaser via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		exitError(err, os.Exit)
@@ -90,14 +93,19 @@ func run(args []string) error {
 		return initCommand(os.Stdin, os.Stdout, args[1:])
 	}
 
-	fs := flag.NewFlagSet("garmin-sync", flag.ContinueOnError)
+	fs := flag.NewFlagSet("fitsel-client", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
 	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
 	statePath := fs.String("state", "", "path to the state file (default: ~/.config/garmin-sync/state.json)")
 	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		fmt.Println("fitsel-client", version)
+		return nil
 	}
 
 	if _, err := parseDate(*since); err != nil {

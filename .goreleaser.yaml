@@ -1,0 +1,50 @@
+# Release config for the public GitHub mirror (kyzrfranz/fitsel-cli): builds the
+# binaries, publishes a GitHub Release and updates the Homebrew tap. Run by
+# .github/workflows/release.yml on a v* tag.
+version: 2
+project_name: fitsel-client
+
+builds:
+  - binary: fitsel-client
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+# Pinned so the release (and the cask's download URLs) always target the
+# GitHub mirror, not whichever remote "origin" happens to be.
+release:
+  github:
+    owner: kyzrfranz
+    name: fitsel-cli
+
+changelog:
+  sort: asc
+
+homebrew_casks:
+  - name: fitsel-client
+    repository:
+      owner: kyzrfranz
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/kyzrfranz/fitsel-cli
+    description: Sync Garmin activities to fitsel
+    # The binary is not signed/notarized: drop the quarantine flag so
+    # Gatekeeper does not block it on first run.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/fitsel-client"]
+          end
