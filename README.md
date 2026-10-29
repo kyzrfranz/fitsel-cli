@@ -269,7 +269,7 @@ A run stops with one of these codes so an athlete (or a schedule) can act on it:
 |---|---|---|
 | 0 | Success. Synced everything that was pending. | Nothing. |
 | 1 | A general failure (network, fitsel, state, first run without `--since`). | See the message on the `error:` line. |
-|| 3 | Your Garmin API key is invalid or expired (Garmin returned 401). | Create a new one at developer.garmin.com — see [Create the Garmin key](#2-create-the-garmin-key). |
+| 3 | Your Garmin API key is invalid or expired (Garmin returned 401). | Create a new one at developer.garmin.com — see [Create the Garmin key](#2-create-the-garmin-key). |
 | 5 | Garmin is rate-limiting you (429); the tool waited for the window in the `error:` line, then stopped. | Wait that long, then run again — do not retry sooner. |
 | 6 | Your fitsel passkey is invalid (fitsel returned 401). | Check `FITSEL_PASSKEY` or copy the right one from fitsel's setup page. |
 | 7 | The fitsel webhook token in the endpoint URL is unknown (fitsel returned 404). | Check the fitsel webhook URL you configured. |
