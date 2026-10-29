@@ -20,6 +20,7 @@ package fitsel
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -110,10 +111,17 @@ func uploadURL(base, token string) string {
 //
 // A 500 or network failure is retried (see uploadAttempts); a 400/401/404 is
 // terminal and never retried.
-func (c *Client) Upload(fit []byte) (bool, error) {
+//
+// The retry delay honours ctx: if the caller's context is cancelled (a Ctrl-C)
+// before the delay elapses, Upload returns ctx.Err() instead of waiting, so a
+// stop reaches the upload loop rather than hanging on the delay.
+func (c *Client) Upload(ctx context.Context, fit []byte) (bool, error) {
 	var lastErr error
 	for attempt := 1; attempt <= uploadAttempts; attempt++ {
-		accepted, err := c.uploadOnce(fit)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		accepted, err := c.uploadOnce(ctx, fit)
 		if err == nil {
 			return accepted, nil
 		}
@@ -124,7 +132,14 @@ func (c *Client) Upload(fit []byte) (bool, error) {
 		}
 		lastErr = err
 		if attempt < uploadAttempts {
-			time.Sleep(uploadDelay)
+			// Wait for the retry delay, but bail early if the caller stops.
+			timer := time.NewTimer(uploadDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return false, ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return false, fmt.Errorf("%w: %v", ErrUploadExhausted, lastErr)
@@ -132,7 +147,7 @@ func (c *Client) Upload(fit []byte) (bool, error) {
 
 // uploadOnce builds the multipart body, signs it, and sends a single request,
 // classifying the response into a sentinel. It returns nil only on 202.
-func (c *Client) uploadOnce(fit []byte) (bool, error) {
+func (c *Client) uploadOnce(ctx context.Context, fit []byte) (bool, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile("fit", "activity.fit")
@@ -147,7 +162,7 @@ func (c *Client) uploadOnce(fit []byte) (bool, error) {
 	}
 
 	sig := hmacSHA256Hex(body.Bytes(), c.passkey)
-	req, err := http.NewRequest(http.MethodPost, c.webhookURL, bytes.NewReader(body.Bytes()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.webhookURL, bytes.NewReader(body.Bytes()))
 	if err != nil {
 		return false, err
 	}

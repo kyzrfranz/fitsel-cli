@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"garmin-sync/internal/config"
@@ -44,6 +46,12 @@ const (
 	// from the run-wide codes above, which stop the whole run before any
 	// activity is attempted.
 	exitPartialFailure = 9
+
+	// exitInterrupted is returned when the run was stopped by a signal
+	// (Ctrl-C / SIGTERM): the athlete asked it to stop mid-run. It is distinct
+	// from partialFailure (a run that finished with a failure) and from the
+	// run-wide codes (which abort before any activity).
+	exitInterrupted = 4
 )
 
 // test hooks: overridden by tests to point at the fake servers.
@@ -59,6 +67,11 @@ var version = "dev"
 // the run finished: it carries the count so main can print a one-line summary
 // and mapExitCode can give the partial run its own exit code.
 var errPartialFailure = errors.New("partial: activity sync failed")
+
+// errInterrupted wraps the run when it was stopped by a signal (Ctrl-C /
+// SIGTERM) mid-run: the athlete asked it to stop, so it is reported with its
+// own exit code (exitInterrupted) and is distinct from a partial failure.
+var errInterrupted = errors.New("sync interrupted")
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -107,6 +120,8 @@ func mapExitCode(err error) int {
 		return exitWebhookMissing
 	case errors.Is(err, errPartialFailure):
 		return exitPartialFailure
+	case errors.Is(err, errInterrupted):
+		return exitInterrupted
 	default:
 		return exitGeneral
 	}
@@ -122,6 +137,21 @@ func run(args []string) error {
 		return runDoctor(os.Stdin, os.Stdout, args[1:])
 	}
 
+	// A Ctrl-C (SIGINT) or SIGTERM stops the run cleanly: the derived context
+	// reaches the sync loop, so an in-flight download or upload returns instead
+	// of running to completion, and no activity that was not already uploaded
+	// is marked synced. stop releases the signal handler when the run ends.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return runWithCtx(ctx, args)
+}
+
+// runWithCtx runs a sync with an already-derived context. It is the testable
+// core: a test drives cancellation by cancelling ctx directly, rather than
+// sending a real signal. run() wraps it with signal.NotifyContext so a Ctrl-C
+// or SIGTERM cancels the same context.
+func runWithCtx(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("fitsel-client", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
 	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
@@ -185,7 +215,6 @@ func run(args []string) error {
 	gar.SetBaseURL(garminBaseURL)
 	up := fitsel.New(*endpoint, creds.FitselToken, creds.FitselPasskey)
 
-	ctx := context.Background()
 	if _, err := gar.Authorize(ctx); err != nil {
 		return fmt.Errorf("authenticating with Garmin: %w", err)
 	}
@@ -224,67 +253,9 @@ func run(args []string) error {
 		return nil
 	}
 
-	synced, failed := 0, 0
-	var partial bool
-	for _, a := range pending {
-		id := itoa(a.ID)
-		// An activity that has failed SkipThreshold times is marked skipped:
-		// leave it alone until it is unskipped, and report it in the summary
-		// rather than retrying it every run.
-		if st.Skipped(id) {
-			fmt.Printf("skipping %s (%s): failed too many times, unskip to retry\n", a.Name, id)
-			continue
-		}
-		fmt.Printf("syncing %s (%s)...\n", a.Name, id)
-		fit, err := gar.Download(ctx, a.ID)
-		if err != nil {
-			// A per-activity download failure (a single activity's FIT is
-			// missing or the download dropped): log it, count it, leave the
-			// activity pending, and move on. The rest of the run still syncs.
-			// If it has now failed too many times, it is marked skipped.
-			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
-			if st.Fail(id) {
-				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
-			}
-			// Persist the incremented count (and any skip) so it survives
-			// across runs; a run that only saved on success would lose it.
-			if err := st.Save(); err != nil {
-				return fmt.Errorf("saving state: %w", err)
-			}
-			failed++
-			partial = true
-			continue
-		}
-		accepted, err := up.Upload(fit)
-		if err != nil {
-			// An upload failure is run-wide: a bad passkey (401), a missing
-			// webhook (404), or fitsel giving up after retries (500) will
-			// fail every activity, so stop the run with its own exit code.
-			if isRunWideUpload(err) {
-				return err
-			}
-			// A per-activity upload failure (e.g. a malformed upload the
-			// endpoint rejects): log it, count it, leave the activity pending,
-			// and move on. The rest of the run still syncs.
-			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
-			if st.Fail(id) {
-				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
-			}
-			// Persist the incremented count (and any skip) so it survives
-			// across runs; a run that only saved on success would lose it.
-			if err := st.Save(); err != nil {
-				return fmt.Errorf("saving state: %w", err)
-			}
-			failed++
-			partial = true
-			continue
-		}
-		_ = accepted // Upload returns nil only on 202; a nil error means success.
-		synced++
-		st.MarkDone(id)
-		if err := st.Save(); err != nil {
-			return fmt.Errorf("saving state: %w", err)
-		}
+	synced, failed, partial, err := syncActivities(ctx, gar, up, st, pending)
+	if err != nil {
+		return err
 	}
 	// List any activities the run left skipped (they failed too many times), so
 	// the athlete knows what is no longer being retried and how to revive them.
@@ -301,6 +272,95 @@ func run(args []string) error {
 	}
 	fmt.Printf("done: %d synced, %d failed this run\n", synced, failed)
 	return nil
+}
+
+// syncActivities downloads and uploads every pending activity in order, marking
+// each one done only after its upload succeeds. It threads ctx through every
+// download and upload so a cancelled context (a Ctrl-C) stops the loop promptly,
+// and returns a partial-failure error if any activity failed while the rest of
+// the run completed.
+//
+// On cancellation it returns errInterrupted without marking the in-flight
+// activity: every activity uploaded before the stop has already persisted its
+// success via Save, so nothing that was synced is lost, and nothing past the
+// last success is marked synced.
+func syncActivities(ctx context.Context, gar *garmin.Client, up *fitsel.Client, st *state.State, pending []garmin.Activity) (synced, failed int, partial bool, err error) {
+	for _, a := range pending {
+		// A stop mid-run: bail before doing any more work, leaving this
+		// activity (and everything after it) unmarked.
+		if err := ctx.Err(); err != nil {
+			return 0, 0, false, errInterrupted
+		}
+		id := itoa(a.ID)
+		// An activity that has failed SkipThreshold times is marked skipped:
+		// leave it alone until it is unskipped, and report it in the summary
+		// rather than retrying it every run.
+		if st.Skipped(id) {
+			fmt.Printf("skipping %s (%s): failed too many times, unskip to retry\n", a.Name, id)
+			continue
+		}
+		fmt.Printf("syncing %s (%s)...\n", a.Name, id)
+		fit, err := gar.Download(ctx, a.ID)
+		if err != nil {
+			// A stop mid-run: do not count it or mark it; leave it pending.
+			if err := ctx.Err(); err != nil {
+				return 0, 0, false, errInterrupted
+			}
+			// A per-activity download failure (a single activity's FIT is
+			// missing or the download dropped): log it, count it, leave the
+			// activity pending, and move on. The rest of the run still syncs.
+			// If it has now failed too many times, it is marked skipped.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
+			if st.Fail(id) {
+				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
+			}
+			// Persist the incremented count (and any skip) so it survives
+			// across runs; a run that only saved on success would lose it.
+			if err := st.Save(); err != nil {
+				return 0, 0, false, fmt.Errorf("saving state: %w", err)
+			}
+			failed++
+			partial = true
+			continue
+		}
+		accepted, err := up.Upload(ctx, fit)
+		if err != nil {
+			// A stop mid-run: do not count it or mark it; leave it pending.
+			if err := ctx.Err(); err != nil {
+				return 0, 0, false, errInterrupted
+			}
+			// An upload failure is run-wide: a bad passkey (401), a missing
+			// webhook (404), or fitsel giving up after retries (500) will
+			// fail every activity, so stop the run with its own exit code.
+			if isRunWideUpload(err) {
+				return 0, 0, false, err
+			}
+			// A per-activity upload failure (e.g. a malformed upload the
+			// endpoint rejects): log it, count it, leave the activity pending,
+			// and move on. The rest of the run still syncs.
+			fmt.Fprintf(os.Stderr, "error: skipping %s: %v\n", id, err)
+			if st.Fail(id) {
+				fmt.Fprintf(os.Stderr, "error: %s has failed %d times; it is now skipped. Use --unskip to retry it.\n", id, st.SkipThreshold)
+			}
+			// Persist the incremented count (and any skip) so it survives
+			// across runs; a run that only saved on success would lose it.
+			if err := st.Save(); err != nil {
+				return 0, 0, false, fmt.Errorf("saving state: %w", err)
+			}
+			failed++
+			partial = true
+			continue
+		}
+		_ = accepted // Upload returns nil only on 202; a nil error means success.
+		synced++
+		// Persist immediately: an activity uploaded before the stop stays
+		// saved even if the run is stopped on the next activity.
+		st.MarkDone(id)
+		if err := st.Save(); err != nil {
+			return 0, 0, false, fmt.Errorf("saving state: %w", err)
+		}
+	}
+	return synced, failed, partial, nil
 }
 
 // itoa formats an activity id as a string key for the state file.
