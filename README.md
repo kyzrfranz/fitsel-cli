@@ -308,10 +308,3 @@ Try a release locally without publishing anything:
 ```sh
 goreleaser release --snapshot --clean   # output in dist/
 ```
-
-### Internal builds
-
-Separately, the Forgejo CI (`.forgejo/workflows/ci.yml`) cross-compiles a binary
-on every merge to `main` and pushes it to the `release-binaries` branch,
-untagged. Those files still carry the old `garmin-sync-*` names; rename the one
-for your platform to `fitsel-client` before use.
