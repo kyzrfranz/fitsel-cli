@@ -15,6 +15,33 @@ import (
 	"path/filepath"
 )
 
+// stateDir is the directory the default state file lives in, mirroring the
+// config file's home-dir default. It is the single place the default path is
+// defined, so both the sync -state flag's documented default and doctor's
+// "state present" check resolve to the same file.
+func stateDir() string {
+	if p := os.Getenv("FITSEL_STATE"); p != "" {
+		return filepath.Dir(p)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".config", "garmin-sync")
+	}
+	return filepath.Join(home, ".config", "garmin-sync")
+}
+
+// Path returns the location of the default state file, honoring $FITSEL_STATE
+// and, unset, the home-dir default. A caller can stat it to tell whether a
+// state file exists before loading it: Load("") returns success for a missing
+// file (an empty state), so presence must be checked on the path, not inferred
+// from a successful Load.
+func Path() string {
+	if p := os.Getenv("FITSEL_STATE"); p != "" {
+		return p
+	}
+	return filepath.Join(stateDir(), "state.json")
+}
+
 // State holds which activity IDs have been synced and how many times each has
 // failed, so a re-run is idempotent and stops chasing one that keeps failing.
 type State struct {
