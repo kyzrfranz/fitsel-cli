@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -25,7 +26,7 @@ func TestUploadAccepted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "passkey")
+	up := New(srv.URL, "", "passkey")
 	fit := []byte("FIT-DATA-1001")
 	accepted, err := up.Upload(fit)
 	if err != nil {
@@ -49,7 +50,7 @@ func TestUploadBadSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "passkey")
+	up := New(srv.URL, "", "passkey")
 	accepted, err := up.Upload([]byte("FIT"))
 	if err == nil {
 		t.Fatal("expected an error on a bad signature")
@@ -82,7 +83,7 @@ func TestUploadBadClassifiesEachSentinel(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			up := New(srv.URL, "passkey")
+			up := New(srv.URL, "", "passkey")
 			accepted, err := up.Upload([]byte("FIT"))
 			if err == nil {
 				t.Fatal("expected an error")
@@ -107,7 +108,7 @@ func TestUpload500RetriesThenExhausted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "passkey")
+	up := New(srv.URL, "", "passkey")
 	accepted, err := up.Upload([]byte("FIT"))
 	if err == nil {
 		t.Fatal("expected an error after retries")
@@ -137,7 +138,7 @@ func TestUpload500RecoversOnRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "passkey")
+	up := New(srv.URL, "", "passkey")
 	accepted, err := up.Upload([]byte("FIT"))
 	if err != nil {
 		t.Fatalf("expected a 202 after a transient 500, got %v", err)
@@ -160,7 +161,7 @@ func TestUploadBadRequestNotRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := New(srv.URL, "passkey")
+	up := New(srv.URL, "", "passkey")
 	if _, err := up.Upload([]byte("FIT")); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("expected ErrBadRequest, got %v", err)
 	}
@@ -180,5 +181,90 @@ func TestFormDataHasFitPart(t *testing.T) {
 	w.Close()
 	if len(body.Bytes()) == 0 {
 		t.Fatal("expected non-empty body")
+	}
+}
+
+// TestUploadBareTokenAppendsToBase proves that with no token in --fitsel-endpoint
+// a bare FITSEL_TOKEN is appended to the base, so the request lands on
+// <base>/<token> (the acceptance: default base + bare token -> request on
+// /ingest/wh/<token>). The base is the test server, so the appended path stays
+// local and the server records the path the request landed on.
+func TestUploadBareTokenAppendsToBase(t *testing.T) {
+	const token = "my-webhook-token"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	up := New(srv.URL, token, "passkey")
+	if accepted, err := up.Upload([]byte("FIT")); err != nil || !accepted {
+		t.Fatalf("upload: accepted=%v err=%v", accepted, err)
+	}
+	if gotPath != "/my-webhook-token" {
+		t.Fatalf("path = %q, want /my-webhook-token", gotPath)
+	}
+}
+
+// TestUploadFullURLOverridesBase proves that a FITSEL_TOKEN pasted as a full
+// webhook URL (starting with https://) is used as the upload URL unchanged, even
+// when --fitsel-endpoint sets a base (the acceptance: full-URL token -> same
+// URL). The base is a throwaway test server; the full-URL token points at a
+// second, trusted TLS server, which records that the request landed there and
+// not on the base.
+func TestUploadFullURLOverridesBase(t *testing.T) {
+	var landedOnBase bool
+	base := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		landedOnBase = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer base.Close()
+
+	// A full-URL token must start with https:// to be used as-is (per the
+	// acceptance). httptest.NewTLSServer gives an https:// URL; the client is
+	// built with a transport that trusts its self-signed certificate.
+	var landedOnFull bool
+	full := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		landedOnFull = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer full.Close()
+
+	up := New(base.URL, full.URL, "passkey")
+	up.http.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // trust the test server's self-signed cert
+	}
+	if accepted, err := up.Upload([]byte("FIT")); err != nil || !accepted {
+		t.Fatalf("upload: accepted=%v err=%v", accepted, err)
+	}
+	if landedOnBase {
+		t.Fatal("a full-URL token must override the base, but the request landed on the base")
+	}
+	if !landedOnFull {
+		t.Fatal("a full-URL token should be used as-is, but the request did not land on it")
+	}
+}
+
+// TestUploadURLResolution covers the two forms a token may be pasted in, and the
+// base-trimming so a trailing slash on the base does not double up.
+func TestUploadURLResolution(t *testing.T) {
+	cases := []struct {
+		name  string
+		base  string
+		token string
+		want  string
+	}{
+		{"bare token appends to base", "https://ingest.fitsel.app/ingest/wh", "tok", "https://ingest.fitsel.app/ingest/wh/tok"},
+		{"full URL used as-is", "https://ingest.fitsel.app/ingest/wh", "https://x.example/wh/tok", "https://x.example/wh/tok"},
+		{"trailing slash on base not doubled", "https://ingest.fitsel.app/ingest/wh/", "tok", "https://ingest.fitsel.app/ingest/wh/tok"},
+		{"leading slash on token not doubled", "https://ingest.fitsel.app/ingest/wh", "/tok", "https://ingest.fitsel.app/ingest/wh/tok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := uploadURL(tc.base, tc.token); got != tc.want {
+				t.Fatalf("uploadURL(%q, %q) = %q, want %q", tc.base, tc.token, got, tc.want)
+			}
+		})
 	}
 }

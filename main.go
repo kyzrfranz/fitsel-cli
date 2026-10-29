@@ -123,7 +123,7 @@ func run(args []string) error {
 	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
 	statePath := fs.String("state", "", "path to the state file (default: "+state.Path()+")")
-	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
+	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL; the upload goes to <base>/<FITSEL_TOKEN>")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	// SkipThreshold is how many per-activity failures before an activity is
 	// marked skipped (no longer retried until --unskip). A run carries it as a
@@ -179,7 +179,7 @@ func run(args []string) error {
 
 	gar := garmin.New(creds.GarminKey)
 	gar.SetBaseURL(garminBaseURL)
-	up := fitsel.New(*endpoint, creds.FitselPasskey)
+	up := fitsel.New(*endpoint, creds.FitselToken, creds.FitselPasskey)
 
 	ctx := context.Background()
 	if _, err := gar.Authorize(ctx); err != nil {
