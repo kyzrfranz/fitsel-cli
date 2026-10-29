@@ -28,7 +28,7 @@ func TestAuthorizeAndList(t *testing.T) {
 		t.Fatal("expected a valid token")
 	}
 
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestListEmpty(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	acts, err := c.List(context.Background(), "2027-01-01")
+	acts, err := c.List(context.Background(), "2027-01-01", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestListPagesAllActivities(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestListExactPageCountIsSingleRequest(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestListJustOverPageTriggersSecondPage(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -152,6 +152,104 @@ func TestListJustOverPageTriggersSecondPage(t *testing.T) {
 	want := []int{0, 100}
 	if len(g.PagesSeen) != len(want) {
 		t.Fatalf("list requests = %v, want %v", g.PagesSeen, want)
+	}
+}
+
+// TestListForwardseEndToEnd proves the end date is forwarded to the list
+// endpoint as its endDate query parameter (alongside the existing startDate),
+// so the windowing is a real server-side filter, not a client-side one.
+func TestListForwardseEndToEnd(t *testing.T) {
+	var gotEnd string
+	var gotStart string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		gotStart = r.URL.Query().Get("startDate")
+		gotEnd = r.URL.Query().Get("endDate")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "[]")
+	}))
+	defer srv.Close()
+
+	c := New("test-garmin-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if _, err := c.List(context.Background(), "2026-10-01", "2026-11-15"); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if gotStart != "2026-10-01" {
+		t.Fatalf("startDate forwarded = %q, want %q", gotStart, "2026-10-01")
+	}
+	if gotEnd != "2026-11-15" {
+		t.Fatalf("endDate forwarded = %q, want %q", gotEnd, "2026-11-15")
+	}
+}
+
+// TestListWithoutEndToEndOpenEnded proves a call without --to does not send an
+// endDate at all: the query carries startDate but no endDate key, so the
+// open-ended upper bound (the --95 behaviour) is untouched.
+func TestListWithoutEndToEndOpenEnded(t *testing.T) {
+	var hasEnd bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		_, hasEnd = r.URL.Query()["endDate"]
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "[]")
+	}))
+	defer srv.Close()
+
+	c := New("test-garmin-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if _, err := c.List(context.Background(), "2026-10-01", ""); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if hasEnd {
+		t.Fatal("a call without --to must not send an endDate query parameter")
+	}
+}
+
+// TestListEndToEndFilters proves the client returns only activities on or before
+// the end date: the fake serves activities spanning a wide date range, and a
+// List with --to returns just those within the window, newest first.
+func TestListEndToEndFilters(t *testing.T) {
+	// Five activities on five consecutive days in December.
+	g := fakes.NewFakeGarmin("test-garmin-key", []fakes.FakeActivity{
+		{ID: 1, Name: "Day 5", StartTimeGMT: "2026-12-05T09:00:00Z"},
+		{ID: 2, Name: "Day 4", StartTimeGMT: "2026-12-04T09:00:00Z"},
+		{ID: 3, Name: "Day 3", StartTimeGMT: "2026-12-03T09:00:00Z"},
+		{ID: 4, Name: "Day 2", StartTimeGMT: "2026-12-02T09:00:00Z"},
+		{ID: 5, Name: "Day 1", StartTimeGMT: "2026-12-01T09:00:00Z"},
+	})
+	defer g.Close()
+	c := New("test-garmin-key")
+	c.SetBaseURL(g.URL())
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	acts, err := c.List(context.Background(), "2026-12-01", "2026-12-03")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// --to Dec 3 keeps Dec 1, 2, 3, which are ids 5, 4, 3. Newest in-window is
+	// Dec 3 = id 3.
+	if len(acts) != 3 {
+		t.Fatalf("expected 3 in-window activities, got %d", len(acts))
+	}
+	// Newest first within the window: Dec 3 (id 3) is the newest in-window.
+	if acts[0].ID != 3 {
+		t.Fatalf("first in-window activity id = %d, want 3 (Dec 3, newest in window)", acts[0].ID)
 	}
 }
 
@@ -284,7 +382,7 @@ func TestRefreshOnExpiry(t *testing.T) {
 	}
 	c.token.expires = time.Now().Add(-time.Hour) // expired
 
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list after expiry: %v", err)
 	}
@@ -310,7 +408,7 @@ func TestRefreshOn401(t *testing.T) {
 		t.Fatalf("authorize: %v", err)
 	}
 
-	acts, err := c.List(context.Background(), "2026-10-01")
+	acts, err := c.List(context.Background(), "2026-10-01", "")
 	if err != nil {
 		t.Fatalf("list after 401: %v", err)
 	}
@@ -336,7 +434,7 @@ func TestRefreshStill401IsBadKey(t *testing.T) {
 	}
 	c.token.expires = time.Now().Add(-time.Hour) // force a refresh
 
-	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrBadKey) {
+	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrBadKey) {
 		t.Fatalf("expected ErrBadKey when the refresh itself 401s, got %v", err)
 	}
 }
@@ -361,7 +459,7 @@ func TestRateLimitedWrapsErrRateLimited(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected errors.Is(err, ErrRateLimited), got %v", err)
 	}
 }
@@ -388,7 +486,7 @@ func TestRateLimitedHonoursRetryAfter(t *testing.T) {
 	}
 
 	start := time.Now()
-	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed < 2*time.Second {
@@ -421,7 +519,7 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if _, err := c.List(context.Background(), "2026-10-01"); !errors.Is(err, ErrRateLimited) {
+	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
 	}
 }

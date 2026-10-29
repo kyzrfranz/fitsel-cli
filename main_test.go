@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"garmin-sync/internal/config"
 	"garmin-sync/internal/fakes"
@@ -710,5 +712,158 @@ func TestInitThenRunEndToEnd(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 3 {
 		t.Fatalf("expected 3 uploads from the stored creds, got %d", len(fits.Uploadees))
+	}
+}
+
+// newWindowedActivities wires a fake Garmin serving n activities across a wide
+// date range (each a day apart, id 1 newest, id n oldest) plus a fake fitsel
+// and the run args, for the --to end-to-end checks. The dates are real
+// ISO-8601 days so the fake's lexicographic endDate filter orders them.
+func newWindowedActivities(t *testing.T, n int) (*fakes.FakeGarmin, *fakes.FakeFitsel, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	// id 1 is the newest: day 0 (2026-11-01); id n is day n-1. Real ISO dates
+	// sort lexicographically, so the fake's endDate filter cuts a clean window.
+	acts := make([]fakes.FakeActivity, 0, n)
+	base := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	for i := 1; i <= n; i++ {
+		day := base.AddDate(0, 0, i-1).Format("2006-01-02T15:04:05Z")
+		acts = append(acts, fakes.FakeActivity{
+			ID:           int64(i),
+			Name:         fmt.Sprintf("Activity %d", i),
+			StartTimeGMT: day,
+		})
+	}
+	gar := fakes.NewFakeGarmin("test-garmin-key", acts)
+	fits := fakes.NewFakeFitsel("test-passkey")
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+	return gar, fits, []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+}
+
+// TestRunWithToEndToEndIsWindowed proves the headline check: with --to on or
+// after the newest activity, every activity since --since is synced (nothing
+// after --to exists here, so all are uploaded); the window's upper bound does
+// not drop anything within it.
+func TestRunWithToEndToEndIsWindowed(t *testing.T) {
+	n := 3
+	_, fits, args := newWindowedActivities(t, n)
+	args = append(args, "-to", "2026-12-31")
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("uploaded %d, want %d (all in window)", got, n)
+	}
+}
+
+// TestRunWithNoEndToEndKeepsOpenUpperBound proves --to omitted is unchanged:
+// everything since --since is synced, exactly the --95 behaviour.
+func TestRunWithNoEndToEndKeepsOpenUpperBound(t *testing.T) {
+	n := 3
+	_, fits, args := newWindowedActivities(t, n)
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("uploaded %d, want %d (no --to: everything since --since)", got, n)
+	}
+}
+
+// TestRunWithEndToEndCutsAbove proves --to drops everything after it: with the
+// fake serving activities on Nov 1..Nov 20 (id 1 newest) and --to 2026-11-10,
+// only those on or before the end date are listed and uploaded; nothing after
+// --to is.
+func TestRunWithEndToEndCutsAbove(t *testing.T) {
+	const n = 20
+	_, fits, args := newWindowedActivities(t, n)
+	args = append(args, "-to", "2026-11-10")
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Activities id 1..10 are Nov 1..Nov 10; id 11..20 are Nov 11..Nov 20, all
+	// after --to and so excluded.
+	if got := len(fits.Uploadees); got != 10 {
+		t.Fatalf("uploaded %d, want 10 (Nov 1..Nov 10), --to cut the rest", got)
+	}
+	// Every uploaded id must be on or before --to: none past Nov 10.
+	for i := int64(11); i <= n; i++ {
+		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(i, 10))); got != 0 {
+			t.Fatalf("activity %d (after --to) was uploaded %d times; want 0", i, got)
+		}
+	}
+}
+
+// TestRunWithEndToEndPaginationNeverTruncated proves the pagination check: the
+// fake serves more than 100 activities inside [--since, --to] across pages, and
+// with --to narrowing the window the client still lists every in-window one
+// (PagesSeen covers all pages) and uploads each — the narrow window never hits
+// the old 100-cap truncation.
+func TestRunWithEndToEndPaginationNeverTruncated(t *testing.T) {
+	const n = 250
+	gar, fits, args := newWindowedActivities(t, n)
+	// All 250 fall on/after 2026-11-01; --to well past the last keeps every one,
+	// so the window spans all 250 across pages — the shape that used to truncate
+	// at 100.
+	args = append(args, "-to", "2027-12-31")
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := len(fits.Uploadees); got != n {
+		t.Fatalf("uploaded %d, want %d (all in window, none dropped at the 100 cap)", got, n)
+	}
+	// The window is bigger than one page, so the client walked all three.
+	want := []int{0, 100, 200}
+	if len(gar.PagesSeen) != len(want) {
+		t.Fatalf("list requests = %v, want %v (all pages walked)", gar.PagesSeen, want)
+	}
+	// Every activity uploaded exactly once.
+	for i := int64(1); i <= n; i++ {
+		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(i, 10))); got != 1 {
+			t.Fatalf("activity %d uploaded %d times; want exactly once", i, got)
+		}
+	}
+}
+
+// TestRunWithBadEndToEndRejected proves a malformed --to is rejected before any
+// network: the run stops with an error naming --to, nothing is uploaded.
+func TestRunWithBadEndToEndRejected(t *testing.T) {
+	_, fits, args := newWindowedActivities(t, 3)
+	args = append(args, "-to", "not-a-date")
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected a run error on a malformed --to")
+	}
+	if !strings.Contains(err.Error(), "--to") {
+		t.Fatalf("error = %q, want it to name --to", err)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("bad --to uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// TestRunWithInvalidEndToEndRejected proves a shape-correct but calendar-invalid
+// --to (e.g. Feb 30) is rejected: parseDate rejects it, so the run stops before
+// any network.
+func TestRunWithInvalidEndToEndRejected(t *testing.T) {
+	_, fits, args := newWindowedActivities(t, 3)
+	args = append(args, "-to", "2026-02-30")
+	err := run(args)
+	if err == nil {
+		t.Fatal("expected a run error on an invalid calendar --to")
+	}
+	if !strings.Contains(err.Error(), "--to") {
+		t.Fatalf("error = %q, want it to name --to", err)
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("invalid --to uploaded %d files; expected none", len(fits.Uploadees))
 	}
 }

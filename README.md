@@ -108,6 +108,13 @@ When the list looks right, run it again without `--dry-run` to upload.
 
 ### Optional flags
 
+- `--since <YYYY-MM-DD>` — only sync activities on or after this date. The first
+  run needs it to set your start date; later runs keep it.
+- `--to <YYYY-MM-DD>` — only sync activities on or before this date. Combined
+  with `--since` it restricts a sync to the window `[--since, --to]`; omit it for
+  the open-ended upper bound (everything since `--since`). The date is forwarded
+  to Garmin's list API, so a narrow window is listed in full and never truncated
+  at the old 100-activity cap.
 - `--state <path>` — where to keep the state file (which activities are synced).
   Default: `~/.config/garmin-sync/state.json`.
 - `--fitsel-endpoint <url>` — the fitsel webhook base URL. Default:
