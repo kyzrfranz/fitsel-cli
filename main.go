@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"garmin-sync/internal/config"
 	"garmin-sync/internal/fitsel"
@@ -91,11 +92,19 @@ func run(args []string) error {
 
 	fs := flag.NewFlagSet("garmin-sync", flag.ContinueOnError)
 	since := fs.String("since", "", "only sync activities on or after this date (YYYY-MM-DD)")
+	to := fs.String("to", "", "only sync activities on or before this date (YYYY-MM-DD); omit for an open-ended upper bound")
 	dry := fs.Bool("dry-run", false, "list what would be uploaded, upload nothing")
 	statePath := fs.String("state", "", "path to the state file (default: ~/.config/garmin-sync/state.json)")
 	endpoint := fs.String("fitsel-endpoint", "https://ingest.fitsel.app/ingest/wh", "fitsel webhook base URL")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if _, err := parseDate(*since); err != nil {
+		return fmt.Errorf("--since: %w", err)
+	}
+	if _, err := parseDate(*to); err != nil {
+		return fmt.Errorf("--to: %w", err)
 	}
 
 	creds, err := config.Load()
@@ -124,7 +133,7 @@ func run(args []string) error {
 		return errors.New("first run: pass --since YYYY-MM-DD to set the start date")
 	}
 
-	acts, err := gar.List(ctx, *since)
+	acts, err := gar.List(ctx, *since, *to)
 	if err != nil {
 		return fmt.Errorf("listing activities: %w", err)
 	}
@@ -173,6 +182,21 @@ func run(args []string) error {
 // itoa formats an activity id as a string key for the state file.
 func itoa(id int64) string {
 	return fmt.Sprintf("%d", id)
+}
+
+// parseDate parses a YYYY-MM-DD date, returning a calendar-valid date (so it
+// rejects e.g. 2026-02-30, not just the shape). An empty string is valid: it
+// means "no bound" for --to, and --since's own first-run check covers the empty
+// case, so callers that treat empty as a missing bound see no error here.
+func parseDate(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, errors.New("want a calendar date YYYY-MM-DD")
+	}
+	return t, nil
 }
 
 // initCommand is the interactive setup subcommand: it walks the athlete through

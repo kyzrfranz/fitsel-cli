@@ -177,6 +177,7 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	startDate := r.URL.Query().Get("startDate")
+	endDate := r.URL.Query().Get("endDate")
 	start, _ := strconv.Atoi(r.URL.Query().Get("start"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	f.mu.Lock()
@@ -184,13 +185,20 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// Filter by startDate, then return the page [start, start+limit): this is
-	// what makes the fake page like the real endpoint, so a client that ignores
-	// the offset would see the same first page twice and a client that does not
-	// page would miss everything past the first page.
+	// Filter by startDate (lower bound) and endDate (upper bound), then return
+	// the page [start, start+limit): this is what makes the fake page like the
+	// real endpoint, so a client that ignores the offset would see the same
+	// first page twice and a client that does not page would miss everything
+	// past the first page. Both bounds are YYYY-MM-DD dates; the activity's start
+	// carries a time, so compare the date portion (first 10 runes) of the start
+	// against the bounds. A YYYY-MM-DD prefix compares chronologically, so the
+	// endDate bound is inclusive of the whole end day.
 	var matched []FakeActivity
 	for _, a := range f.activities {
-		if startDate == "" || a.StartTimeGMT >= startDate {
+		start := a.StartTimeGMT[:10]
+		startOn := startDate == "" || start >= startDate
+		endOn := endDate == "" || start <= endDate
+		if startOn && endOn {
 			matched = append(matched, a)
 		}
 	}

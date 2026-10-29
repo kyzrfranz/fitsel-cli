@@ -175,15 +175,16 @@ type Activity struct {
 // only way to reach an athlete's activities past the first 100 since --since.
 const pageSize = 100
 
-// List returns activities at or after startDate (YYYY-MM-DD), newest first. It
-// walks every page the endpoint returns, so an athlete with more than pageSize
-// activities since startDate is not silently truncated at the first 100: each
-// page is requested at the running offset and appended, until a page returns
-// fewer than pageSize activities (the last one).
-func (c *Client) List(ctx context.Context, startDate string) ([]Activity, error) {
+// List returns activities at or after startDate (YYYY-MM-DD), newest first. If
+// endDate is non-empty it also returns only those on or before it, so a call
+// lists the window [--since, --to]. It walks every page the endpoint returns,
+// so an athlete with more than pageSize activities in the window is not silently
+// truncated at the first 100: each page is requested at the running offset and
+// appended, until a page returns fewer than pageSize activities (the last one).
+func (c *Client) List(ctx context.Context, startDate, endDate string) ([]Activity, error) {
 	out := make([]Activity, 0)
 	for start := 0; ; start += pageSize {
-		page, err := c.listPage(ctx, startDate, start)
+		page, err := c.listPage(ctx, startDate, endDate, start)
 		if err != nil {
 			return nil, err
 		}
@@ -199,12 +200,18 @@ func (c *Client) List(ctx context.Context, startDate string) ([]Activity, error)
 }
 
 // listPage fetches one page of activities starting at offset start, newest
-// first, returning just that page's activities.
-func (c *Client) listPage(ctx context.Context, startDate string, start int) ([]Activity, error) {
+// first, returning just that page's activities. endDate limits the upper bound
+// (empty means open-ended at the top): it is forwarded to the endpoint as its
+// endDate query parameter only when non-empty, so a call without --to is
+// unchanged from the open-ended --since behaviour.
+func (c *Client) listPage(ctx context.Context, startDate, endDate string, start int) ([]Activity, error) {
 	q := url.Values{}
 	q.Set("start", strconv.Itoa(start))
 	q.Set("limit", strconv.Itoa(pageSize))
 	q.Set("startDate", startDate)
+	if endDate != "" {
+		q.Set("endDate", endDate)
+	}
 	q.Set("sortBy", "beginTimestamp")
 	q.Set("sortOrder", "desc")
 	u := fmt.Sprintf("%s/activitylist-service/activities/search/activities?%s", c.baseURL, q.Encode())
