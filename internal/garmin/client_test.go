@@ -553,3 +553,45 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 		t.Fatalf("expected ErrRateLimited, got %v", err)
 	}
 }
+
+// TestRateLimitedBailsOnCancel proves a 429 back-off honours the run's context:
+// cancelling mid-wait returns at once with a context error instead of sitting
+// through the whole Retry-After window (per #134). This is the cancel half of
+// TestRateLimitedHonoursRetryAfter, which proves the wait is honoured when the
+// context is not cancelled.
+func TestRateLimitedBailsOnCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := c.List(ctx, "2026-10-01", "")
+	if err == nil {
+		t.Fatal("expected an error on cancel")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("back-off took %v, want well under the 30s window (cancelled mid-wait)", elapsed)
+	}
+}

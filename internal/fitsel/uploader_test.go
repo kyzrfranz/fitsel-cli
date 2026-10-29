@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestUploadAccepted(t *testing.T) {
@@ -149,6 +150,45 @@ func TestUpload500RecoversOnRetry(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&attempts); got != 2 {
 		t.Fatalf("attempts = %d, want 2 (a 500 then a 202)", got)
+	}
+}
+
+// TestUploadDelayBailsOnCancel proves the retry delay honours the run's context:
+// cancelling mid-wait returns at once with a context error instead of sitting
+// through the whole uploadDelay window (per #134). This is the cancel half of
+// TestUpload500RetriesThenExhausted, which proves the delay elapses when the
+// context is not cancelled.
+func TestUploadDelayBailsOnCancel(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	up := New(srv.URL, "", "passkey")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Let the first attempt hit the 500, then cancel during the retry
+		// delay: the second attempt must never start.
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := up.Upload(ctx, []byte("FIT"))
+	if err == nil {
+		t.Fatal("expected an error on cancel")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("retry delay took %v, want well under the %ds window (cancelled mid-wait)", elapsed, uploadDelay/time.Second)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("attempts = %d, want 1 (a cancelled delay must not start a second attempt)", got)
 	}
 }
 
