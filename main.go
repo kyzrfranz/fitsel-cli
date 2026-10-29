@@ -57,7 +57,7 @@ var version = "dev"
 
 // errPartialFailure wraps the run when at least one activity failed to sync but
 // the run finished: it carries the count so main can print a one-line summary
-// and mapGarminExit can give the partial run its own exit code.
+// and mapExitCode can give the partial run its own exit code.
 var errPartialFailure = errors.New("partial: activity sync failed")
 
 func main() {
@@ -71,7 +71,7 @@ func main() {
 // tested without os.Exit killing the test process (see TestErrorPrintedOnStderr).
 func exitError(err error, exit func(int)) {
 	fmt.Fprintln(os.Stderr, "error:", err)
-	exit(mapGarminExit(err))
+	exit(mapExitCode(err))
 }
 
 // isRunWideUpload reports whether an upload failure is run-wide: it will fail
@@ -85,12 +85,16 @@ func isRunWideUpload(err error) bool {
 		errors.Is(err, fitsel.ErrUploadExhausted)
 }
 
-// mapGarminExit turns the transport failures into their own exit codes so an
-// athlete (or a cron) can act on them (see the README). It handles both the
-// Garmin-side failures and the fitsel upload failures; everything else falls
-// through to the general error code.
-func mapGarminExit(err error) int {
+// mapExitCode turns failures into their own exit codes so an athlete (or a
+// cron) can act on them (see the README). It handles config and credential
+// failures, the Garmin-side failures and the fitsel upload failures; everything
+// else falls through to the general error code.
+func mapExitCode(err error) int {
 	switch {
+	case errors.Is(err, config.ErrMissingCredentials):
+		return exitConfig
+	case errors.Is(err, config.ErrConfigUnreadable):
+		return exitConfig
 	case errors.Is(err, garmin.ErrBadKey):
 		return exitGarmin
 	case errors.Is(err, garmin.ErrRateLimited):
