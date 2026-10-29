@@ -30,7 +30,6 @@ const (
 	exitOK          = 0
 	exitConfig      = 2
 	exitGarmin      = 3
-	exitUpload      = 4
 	exitRateLimited = 5
 	exitGeneral     = 1
 
@@ -102,8 +101,6 @@ func mapGarminExit(err error) int {
 		return exitBadSignature
 	case errors.Is(err, fitsel.ErrNotFound):
 		return exitWebhookMissing
-	case errors.Is(err, fitsel.ErrBadRequest):
-		return exitUpload
 	case errors.Is(err, errPartialFailure):
 		return exitPartialFailure
 	default:
