@@ -532,9 +532,12 @@ func TestRateLimitedHonoursRetryAfter(t *testing.T) {
 	}
 }
 
-// TestRateLimitedDoesNotRetry proves the client stops after a single 429 —
-// no retry loop that would keep hammering a rate-limited API.
-func TestRateLimitedDoesNotRetry(t *testing.T) {
+// TestRateLimitedRetriesOnceWithinCap proves the client honours a short Retry-
+// After (at or below RetryAfterCap) by waiting and then retrying the request
+// once: the first 429 is followed by a second call, which succeeds. This is the
+// new behaviour (#133) — a single 429 is no longer a hard stop when Garmin gave
+// us a window to come back within.
+func TestRateLimitedRetriesOnceWithinCap(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "token") {
@@ -542,13 +545,16 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 			fmt.Fprint(w, "the-token")
 			return
 		}
-		// Only ever answer the first call; a retry would hit an unclosed
-		// server and panic. If we get here twice the client retried.
-		if atomic.AddInt32(&calls, 1) > 1 {
-			t.Error("client retried a 429; expected to stop after one")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			// First protected call: 429 with a short Retry-After (below the
+			// cap), so the client waits and retries.
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
 		}
-		w.Header().Set("Retry-After", "0")
-		http.Error(w, "slow down", http.StatusTooManyRequests)
+		// Second call (the retry): a normal listing.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "[]")
 	}))
 	defer srv.Close()
 
@@ -557,8 +563,11 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 	if _, err := c.Authorize(context.Background()); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	if _, err := c.List(context.Background(), "2026-10-01", ""); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("expected ErrRateLimited, got %v", err)
+	if _, err := c.List(context.Background(), "2026-10-01", ""); err != nil {
+		t.Fatalf("list after a retried 429: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("protected calls = %d, want 2 (the 429 then the retry)", got)
 	}
 }
 
@@ -568,6 +577,179 @@ func TestRateLimitedDoesNotRetry(t *testing.T) {
 // TestRateLimitedHonoursRetryAfter, which proves the wait is honoured when the
 // context is not cancelled.
 func TestRateLimitedBailsOnCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := c.List(ctx, "2026-10-01", "")
+	if err == nil {
+		t.Fatal("expected an error on cancel")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("back-off took %v, want well under the 30s window (cancelled mid-wait)", elapsed)
+	}
+}
+
+// TestRateLimitedOverCapStopsImmediately proves a Retry-After past the cap
+// (RetryAfterCap) does not stall the run: the client stops at once, returning
+// ErrRateLimited with the retry time in the error line, so the run exits 5 with
+// the information rather than waiting out a window it cannot honour. This is
+// the core of #133 — a far-future window is reported, not waited.
+func TestRateLimitedOverCapStopsImmediately(t *testing.T) {
+	// Shorten the cap for the test so the assertion is meaningful.
+	origCap := RetryAfterCap
+	RetryAfterCap = 60 * time.Second
+	t.Cleanup(func() { RetryAfterCap = origCap })
+
+	// Retry-After an hour in the future — far past the 60s cap.
+	future := time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", future)
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	start := time.Now()
+	_, err := c.List(context.Background(), "2026-10-01", "")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("back-off took %v; a Retry-After past the cap must stop immediately", elapsed)
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+	// The error line must carry the retry time so the run reports it.
+	if !strings.Contains(err.Error(), "retry after") {
+		t.Fatalf("error line must name the retry time, got %q", err.Error())
+	}
+}
+
+// TestRateLimitedHTTPDateFarFutureStopsImmediately proves an HTTP-date form of
+// Retry-After far in the future is treated like any other over-cap window: it
+// stops immediately rather than being parsed and waited out.
+func TestRateLimitedHTTPDateFarFutureStopsImmediately(t *testing.T) {
+	origCap := RetryAfterCap
+	RetryAfterCap = 60 * time.Second
+	t.Cleanup(func() { RetryAfterCap = origCap })
+
+	// An HTTP-date an hour out, in the absolute-date form the spec allows.
+	future := time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		w.Header().Set("Retry-After", future)
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	start := time.Now()
+	_, err := c.List(context.Background(), "2026-10-01", "")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("back-off took %v; a far-future HTTP-date must stop immediately", elapsed)
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestRateLimitedWithinCapHonoursAndRetries proves a Retry-After at or below the
+// cap is honoured: the client waits the window, then retries the request. It
+// uses a short window (well under the cap) and asserts the wait took at least
+// that long and the request was retried.
+func TestRateLimitedWithinCapHonoursAndRetries(t *testing.T) {
+	origCap := RetryAfterCap
+	RetryAfterCap = 60 * time.Second
+	t.Cleanup(func() { RetryAfterCap = origCap })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "token") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "the-token")
+			return
+		}
+		if atomic.AddInt32(&calls, 1) == 1 {
+			// A 1s window — below the 60s cap: wait then retry. (The parser
+			// accepts whole seconds only, so this is the shortest window it
+			// will actually honour.)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "[]")
+	}))
+	defer srv.Close()
+
+	c := New("secret-key")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Authorize(context.Background()); err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := c.List(context.Background(), "2026-10-01", ""); err != nil {
+		t.Fatalf("list after a retried 429: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond {
+		t.Fatalf("waited %v; a Retry-After within the cap should be honoured", elapsed)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("protected calls = %d, want 2 (the 429 then the retry)", got)
+	}
+}
+
+// TestRateLimitedBailsOnCancelDuringWait proves the wait itself is cancellable
+// (#104): a 429 with a Retry-After within the cap still honours the run's
+// context, returning ctx.Err() at once on cancel instead of sitting through the
+// whole window. This is the cancel half of TestRateLimitedWithinCapHonoursAndRetries.
+func TestRateLimitedBailsOnCancelDuringWait(t *testing.T) {
+	origCap := RetryAfterCap
+	RetryAfterCap = 60 * time.Second
+	t.Cleanup(func() { RetryAfterCap = origCap })
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "token") {
 			w.Header().Set("Content-Type", "text/plain")

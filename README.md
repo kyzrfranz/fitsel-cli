@@ -402,7 +402,7 @@ A run stops with one of these codes so an athlete (or a schedule) can act on it:
 | 2 | Your configuration is wrong: a required secret is missing, or the config file is present but could not be read or parsed. | Fix the message on the `error:` line — set the missing secret, or check the config file at the path it names. |
 | 1 | A general failure (network, fitsel, state, first run without `--since`). | See the message on the `error:` line. |
 | 3 | Your Garmin API key is invalid or expired (Garmin returned 401). | Create a new one at developer.garmin.com — see [Create the Garmin key](#2-create-the-garmin-key). |
-| 5 | Garmin is rate-limiting you (429); the tool waited for the window in the `error:` line, then stopped. | Wait that long, then run again — do not retry sooner. |
+|| 5 | Garmin is rate-limiting you (429). The tool waited for Garmin's `Retry-After` window (capped at 60s) and retried once; if the window was longer than the cap, or the retry 429'd again, it stopped. The `error:` line names when Garmin asked you to come back. | If the `error:` line says the window was over the 60s cap, wait until then and run again — do not retry sooner. If it retried and stopped, just run again. |
 | 6 | Your fitsel passkey is invalid (fitsel returned 401). | Check `FITSEL_PASSKEY` or copy the right one from fitsel's setup page. |
 | 7 | The fitsel webhook token in the endpoint URL is unknown (fitsel returned 404). | Check the fitsel webhook URL you configured. |
 | 8 | fitsel would not accept the upload (server error 500 or no network); the tool tried a few times, then stopped. | Wait a moment, then run again — nothing was marked synced, so the pending activity will be retried. |
