@@ -89,20 +89,6 @@ on your `PATH`:
 go build -o fitsel-client .
 ```
 
-### Windows (Scoop / winget)
-
-Windows installs via Scoop or winget once the release manifest ships. It is
-published by GoReleaser as part of the release workflow (task #155); until that
-is out, use the direct-download archive above. When it lands, install with:
-
-```sh
-scoop install kyzrfranz/fitsel-client
-# or
-winget install kyzrfranz.fitsel-client
-```
-
-These commands are future-only — the manifest does not exist yet (#155), so do
-not run them before then; use the direct-download archive above.
 
 ## 2. Create the Garmin key
 
