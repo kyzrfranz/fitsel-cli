@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Credentials holds the three secrets the tool needs.
@@ -19,6 +21,11 @@ type Credentials struct {
 	GarminKey     string `json:"garmin_api_key"`
 	FitselToken   string `json:"fitsel_token"`
 	FitselPasskey string `json:"fitsel_passkey"`
+	// PersonalAPIKeyExpiry is the athlete's Garmin Personal API key expiry
+	// date (YYYY-MM-DD). It is a non-secret calendar date, not a secret: the
+	// tool stores it so it can warn before the key lapses. It is optional and
+	// written only when set (omitempty), so a config without it is unchanged.
+	PersonalAPIKeyExpiry string `json:"personal_api_key_expiry,omitempty"`
 }
 
 // ErrMissingCredentials is returned when a required secret is absent.
@@ -207,4 +214,42 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// SetPersonalAPIKeyExpiry records the athlete's Personal API key expiry date
+// (a YYYY-MM-DD string) in the SAME config file Load reads, without touching
+// the three secrets. It validates the date BEFORE writing (rejecting any value
+// that is not a real calendar date), and writes nothing on failure: any prior
+// value stays intact, the file stays valid JSON, and no empty value is written.
+// It works whether or not a valid date was already stored, and never touches the
+// environment, so a fresh or partially-filled config can be updated on its own.
+// The caller decides the exit code on a bad date; this returns the parsed date
+// on success or an error on garbage.
+func (c Credentials) SetPersonalAPIKeyExpiry(value string) (string, error) {
+	date, err := parseExpiry(value)
+	if err != nil {
+		return "", err
+	}
+	// Read the file as-is (no env fill, no missing-keys gate, no placeholder
+	// write) so whatever else is there is preserved; the field we own is set.
+	existing, err := loadFromFile()
+	if err != nil {
+		return "", err
+	}
+	existing.PersonalAPIKeyExpiry = date
+	if err := existing.Save(); err != nil {
+		return "", err
+	}
+	return date, nil
+}
+
+// parseExpiry validates a strict YYYY-MM-DD calendar date, returning it trimmed
+// so a rejected value (wrong format, month 13, Feb 30, a bare date) fails. It is
+// the single gate before any expiry write, so nothing is written for garbage.
+func parseExpiry(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if _, err := time.Parse("2006-01-02", value); err != nil {
+		return "", errors.New("want a calendar date YYYY-MM-DD")
+	}
+	return value, nil
 }
