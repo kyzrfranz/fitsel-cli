@@ -283,10 +283,10 @@ func (s *State) StartTime() string { return s.start }
 // called after a real sync of at least one activity, with the newest activity's
 // start date seen this run (List returns newest first, so that is acts[0]).
 func (s *State) AdvanceStartIfLater(d string) {
-	if d == "" || s.start == "" {
-		return
+	if d == "" {
+		return // nothing to record; never advance on an empty date
 	}
-	if d > s.start {
+	if s.start == "" || d > s.start {
 		s.start = d
 	}
 }
