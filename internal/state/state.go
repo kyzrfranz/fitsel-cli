@@ -58,6 +58,11 @@ type SyncMeta struct {
 	Start string `json:"start"`
 }
 
+// StateVersion is the on-disk format this package writes. It is bumped when the
+// shape changes so Load can tell a pre-#127 plain-ID-map file from a versioned
+// one (see Load).
+const StateVersion = 1
+
 // State holds which activity IDs have been synced and how many times each has
 // failed, so a re-run is idempotent and stops chasing one that keeps failing.
 type State struct {
@@ -77,6 +82,17 @@ type State struct {
 	// the struct (it is a derived value), but it is persisted to the file as
 	// lastSyncedAt so status can report it offline on the next run.
 	lastSyncedAt time.Time
+
+	// start is the sync point the tool lists from on a later --since-less run:
+	// the start date of the newest activity synced so far. It is "" when
+	// unknown (a brand-new state, or a pre-#127 file that migrated in place
+	// with no known point), which run() treats exactly like a first run.
+	start string
+
+	// dirty is set when a loaded file still holds the pre-#127 plain-ID-map
+	// shape; the next Save rewrites it in the versioned form once, then clears
+	// the flag so a migrated file stays migrated on disk.
+	dirty bool
 }
 
 // skipThreshold is the default number of failures after which an activity is
@@ -117,7 +133,13 @@ func Load(path string) (*State, error) {
 	// reload together. The skip set is the actual decision (which activities to
 	// leave alone); the count is what drives it. Persisting both means a changed
 	// --skip-threshold between runs still restores the right skips.
+	//
+	// It also carries the sync point (start_time) so a later --since-less run
+	// can list from it instead of re-listing all history, and a version so a
+	// pre-#127 plain-ID-map file can be told from a versioned one.
 	var data struct {
+		Version      *int                       `json:"version"`
+		StartTime    string                     `json:"start_time"`
 		Synced       map[string]json.RawMessage `json:"synced"`
 		Fails        map[string]int             `json:"fails"`
 		Skips        map[string]bool            `json:"skips"`
@@ -125,6 +147,15 @@ func Load(path string) (*State, error) {
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		return nil, err
+	}
+	// A file with no "version" is the pre-#127 plain-ID-map shape. Keep its
+	// synced/fails/skips maps but leave the sync point unknown ("") and mark
+	// the state dirty so the next Save rewrites it in the versioned form.
+	// Otherwise read version + start_time.
+	if data.Version == nil {
+		s.dirty = true
+	} else {
+		s.start = data.StartTime
 	}
 	// Each synced entry is either the new object shape ({"name":..,"start":..})
 	// or the old bare boolean (true). A bare boolean cannot unmarshal into
@@ -241,6 +272,25 @@ func (s *State) NewestSynced() (id string, meta SyncMeta) {
 	return id, meta
 }
 
+// StartTime returns the stored sync point: the start date of the newest
+// activity synced so far, as a YYYY-MM-DD string, or "" when unknown. run()
+// treats "" exactly like a first run — without --since it stops with the
+// original message rather than listing all history since the start of time.
+func (s *State) StartTime() string { return s.start }
+
+// AdvanceStartIfLater locks the sync point to d (a YYYY-MM-DD date) only when d
+// is later than the current non-empty point — so a run never lowers it. It is
+// called after a real sync of at least one activity, with the newest activity's
+// start date seen this run (List returns newest first, so that is acts[0]).
+func (s *State) AdvanceStartIfLater(d string) {
+	if d == "" {
+		return // nothing to record; never advance on an empty date
+	}
+	if s.start == "" || d > s.start {
+		s.start = d
+	}
+}
+
 // Save persists the state atomically (temp file + rename) so a crash mid-write
 // cannot corrupt it. It writes the synced set (with metadata), the failure
 // counts, the skip set, and the run-level last-synced time, so none is lost
@@ -257,14 +307,18 @@ func (s *State) Save() error {
 		return err
 	}
 	data := struct {
+		Version      *int                `json:"version"`
+		StartTime    string              `json:"start_time"`
 		Synced       map[string]SyncMeta `json:"synced"`
 		Fails        map[string]int      `json:"fails"`
 		Skips        map[string]bool     `json:"skips"`
 		LastSyncedAt string              `json:"lastSyncedAt"`
 	}{
-		Synced: s.synced,
-		Fails:  s.fails,
-		Skips:  s.skips,
+		Version:   intPtr(StateVersion),
+		StartTime: s.start,
+		Synced:    s.synced,
+		Fails:     s.fails,
+		Skips:     s.skips,
 	}
 	if !s.lastSyncedAt.IsZero() {
 		data.LastSyncedAt = s.lastSyncedAt.Format(time.RFC3339)
@@ -277,5 +331,15 @@ func (s *State) Save() error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	// A file that migrated in place (pre-#127 shape) is now rewritten in the
+	// versioned form; clear the flag so a later Save does not rewrite it again.
+	s.dirty = false
+	return nil
 }
+
+// intPtr returns a pointer to v, so a version field is always written (never
+// omitted) in the versioned state file.
+func intPtr(v int) *int { return &v }

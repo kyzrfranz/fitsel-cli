@@ -37,6 +37,13 @@ type FakeGarmin struct {
 	// (e.g. [0 100 200]). Empty until the first list request is served.
 	PagesSeen []int
 
+	// StartDatesSeen records the startDate query parameter of each list request
+	// the server has served, in order — a test reads it to prove a --since-less
+	// run lists from the stored point minus the overlap (e.g. a run that lists
+	// from "2026-10-23" after a stored point of "2026-10-25"). Empty until the
+	// first list request is served.
+	StartDatesSeen []string
+
 	// UnauthorizedOnce makes the next protected call (List or Download) return
 	// 401 once, then recover — a light way to exercise the client's refresh-on-
 	// 401 without a real expired token. Cleared after it fires once.
@@ -187,6 +194,9 @@ func (f *FakeGarmin) handleList(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	f.mu.Lock()
 	f.PagesSeen = append(f.PagesSeen, start)
+	f.mu.Unlock()
+	f.mu.Lock()
+	f.StartDatesSeen = append(f.StartDatesSeen, startDate)
 	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()

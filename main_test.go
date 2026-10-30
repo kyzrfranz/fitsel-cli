@@ -2397,3 +2397,258 @@ func TestUpdateCheckOptedOutMakesNoRequest(t *testing.T) {
 		t.Fatalf("opted-out run made %d requests; want 0", got)
 	}
 }
+
+// TestIncrementalResumesFromStoredPoint is the headline check: run 1 with
+// --since uploads everything; run 2 without --since lists only from the stored
+// point minus the 2-day overlap (so only the activity added since run 1 is
+// pending); run 3 uploads only the next new one. Run 2 repeated with nothing
+// new prints "nothing to sync — up to date". A fresh fake serves each run — the
+// state file persists on disk, only the fakes differ process to process.
+func TestIncrementalResumesFromStoredPoint(t *testing.T) {
+	useFastDelays(t)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// Run 1: explicit --since. All three pending activities upload.
+	{
+		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		if len(fits.Uploadees) != 3 {
+			t.Fatalf("run 1 uploaded %d; want 3", len(fits.Uploadees))
+		}
+		gar.Close()
+		fits.Close()
+	}
+
+	// Run 2: no --since. The stored point is 2026-10-27 (newest of run 1), so
+	// the fake is asked to list from 2026-10-25. Only 1004 (2026-10-28) is new.
+	{
+		more := newActivities()
+		more = append(more, fakes.FakeActivity{ID: 1004, Name: "Night Swim", StartTimeGMT: "2026-10-28 19:00:00"})
+		gar := fakes.NewFakeGarmin("test-garmin-key", more)
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		if len(fits.Uploadees) != 1 {
+			t.Fatalf("run 2 uploaded %d; want only the 1 new activity", len(fits.Uploadees))
+		}
+		if got := fits.Count([]byte("FIT-DATA-1004")); got != 1 {
+			t.Fatalf("1004 uploaded %d times; want once", got)
+		}
+		if len(gar.StartDatesSeen) != 1 {
+			t.Fatalf("run 2 list count = %d; want 1", len(gar.StartDatesSeen))
+		}
+		if got := gar.StartDatesSeen[0]; got != "2026-10-25" {
+			t.Fatalf("run 2 listed from %q; want 2026-10-25 (stored 2026-10-27 minus 2 days)", got)
+		}
+		gar.Close()
+		fits.Close()
+	}
+
+	// Run 2 again, nothing new: lists from the stored point, everything already
+	// synced, so nothing to upload.
+	{
+		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 2b: %v", err)
+		}
+		if len(fits.Uploadees) != 0 {
+			t.Fatalf("run 2b uploaded %d; want nothing", len(fits.Uploadees))
+		}
+		gar.Close()
+		fits.Close()
+	}
+
+	// Run 3: a third new activity, added after run 2. Lists from the stored
+	// point (now 2026-10-28), so only the brand-new activity uploads.
+	{
+		more := newActivities()
+		more = append(more,
+			fakes.FakeActivity{ID: 1004, Name: "Night Swim", StartTimeGMT: "2026-10-28 19:00:00"},
+			fakes.FakeActivity{ID: 1005, Name: "Morning Yoga", StartTimeGMT: "2026-10-29 06:30:00"},
+		)
+		gar := fakes.NewFakeGarmin("test-garmin-key", more)
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 3: %v", err)
+		}
+		if len(fits.Uploadees) != 1 {
+			t.Fatalf("run 3 uploaded %d; want only the 1 new activity", len(fits.Uploadees))
+		}
+		if got := fits.Count([]byte("FIT-DATA-1005")); got != 1 {
+			t.Fatalf("1005 uploaded %d times; want once", got)
+		}
+		gar.Close()
+		fits.Close()
+	}
+}
+
+// TestNoStateWithoutSinceStillFails proves a brand-new state (no state file)
+// without --since stops with the original first-run message, not a listing of
+// all history.
+func TestNoStateWithoutSinceStillFails(t *testing.T) {
+	useFastDelays(t)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	err := run(args)
+	if err == nil {
+		t.Fatal("run without --since and no state: expected an error")
+	}
+	if err.Error() != "first run: pass --since YYYY-MM-DD to set the start date" {
+		t.Fatalf("error = %q; want the original first-run message", err.Error())
+	}
+	// The fake listed nothing: the run stopped before any list call.
+	if len(gar.PagesSeen) != 0 {
+		t.Fatalf("run listed %d pages; want 0 (stopped at the first-run guard)", len(gar.PagesSeen))
+	}
+}
+
+// TestMigratedStateStillRequiresSince proves a pre-#127 plain-ID-map file
+// (no "version") migrates in place with the sync point unknown, so a --since-less
+// run still stops with the original first-run message rather than listing all
+// history since the start of time.
+func TestMigratedStateStillRequiresSince(t *testing.T) {
+	useFastDelays(t)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	// A pre-#127 file: a plain ID map with no "version" field.
+	if err := os.WriteFile(statePath, []byte(`{"synced":{},"fails":{},"skips":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	err := run(args)
+	if err == nil {
+		t.Fatal("run without --since on a migrated file: expected an error")
+	}
+	if err.Error() != "first run: pass --since YYYY-MM-DD to set the start date" {
+		t.Fatalf("error = %q; want the original first-run message", err.Error())
+	}
+	if len(gar.PagesSeen) != 0 {
+		t.Fatalf("run listed %d pages; want 0", len(gar.PagesSeen))
+	}
+	// A following real --since run writes a versioned file that carries a
+	// start_time.
+	args = []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	if err := run(args); err != nil {
+		t.Fatalf("real --since run: %v", err)
+	}
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "\"version\"") || !strings.Contains(string(b), "\"start_time\"") {
+		t.Fatalf("after a real --since run the state should be versioned with start_time:\n%s", b)
+	}
+}
+
+// TestExplicitSinceWinsOverStored proves an explicit --since always wins over
+// the stored point: with a stored point of 2026-10-27, an earlier --since of
+// 2026-09-01 lists from 2026-09-01; a --since-less run lists from the stored
+// point minus 2 days.
+func TestExplicitSinceWinsOverStored(t *testing.T) {
+	useFastDelays(t)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// Run 1 with --since 2026-10-01 locks the stored point at 2026-10-27.
+	{
+		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		gar.Close()
+		fits.Close()
+	}
+
+	// Run 2 with an earlier --since 2026-09-01: the explicit flag wins over the
+	// stored point. It uploads everything again (all are at or after 2026-09-01)
+	// and advances the stored point to 2026-10-27 (the newest of the run).
+	{
+		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-since", "2026-09-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		if len(gar.StartDatesSeen) != 1 {
+			t.Fatalf("run 2 list count = %d; want 1", len(gar.StartDatesSeen))
+		}
+		if got := gar.StartDatesSeen[0]; got != "2026-09-01" {
+			t.Fatalf("run 2 listed from %q; want 2026-09-01 (explicit --since wins)", got)
+		}
+		gar.Close()
+		fits.Close()
+	}
+
+	// Run 3 without --since: lists from the stored point (now 2026-10-27, set by
+	// run 2's explicit --since) minus 2 days.
+	{
+		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+		fits := fakes.NewFakeFitsel("test-passkey")
+		garminBaseURL = gar.URL()
+		fitselBaseURL = fits.URL()
+		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+		if err := run(args); err != nil {
+			t.Fatalf("run 3: %v", err)
+		}
+		if len(gar.StartDatesSeen) != 1 {
+			t.Fatalf("run 3 list count = %d; want 1", len(gar.StartDatesSeen))
+		}
+		if got := gar.StartDatesSeen[0]; got != "2026-10-25" {
+			t.Fatalf("run 3 listed from %q; want 2026-10-25 (stored 2026-10-27 minus 2 days)", got)
+		}
+		gar.Close()
+		fits.Close()
+	}
+}

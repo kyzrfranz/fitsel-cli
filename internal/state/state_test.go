@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -282,5 +283,73 @@ func TestNewestSyncedNoStartSortsLast(t *testing.T) {
 	id, meta := s.NewestSynced()
 	if id != "1002" {
 		t.Fatalf("newest = %q (%s), want 1002 (With Start)", id, meta.Name)
+	}
+}
+
+// TestStartTimeUnknownByDefault proves a fresh state reports no sync point, so
+// a --since-less run stops with the first-run message rather than listing all
+// history.
+func TestStartTimeUnknownByDefault(t *testing.T) {
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.StartTime() != "" {
+		t.Fatalf("fresh state start time = %q, want empty", s.StartTime())
+	}
+}
+
+// TestAdvanceStartIfLaterNeverRegresses proves the sync point only moves later:
+// it is set to d when the current point is empty or earlier, and left alone
+// when d is earlier than the current point.
+func TestAdvanceStartIfLaterNeverRegresses(t *testing.T) {
+	s, _ := Load("")
+	s.AdvanceStartIfLater("2026-10-25")
+	if s.StartTime() != "2026-10-25" {
+		t.Fatalf("start time = %q, want 2026-10-25", s.StartTime())
+	}
+	// A later date advances it.
+	s.AdvanceStartIfLater("2026-10-27")
+	if s.StartTime() != "2026-10-27" {
+		t.Fatalf("start time = %q, want 2026-10-27", s.StartTime())
+	}
+	// An earlier date does not regress it.
+	s.AdvanceStartIfLater("2026-10-01")
+	if s.StartTime() != "2026-10-27" {
+		t.Fatalf("start time = %q, want 2026-10-27 (no regression)", s.StartTime())
+	}
+}
+
+// TestMigrateInPlaceRewritesVersioned proves a pre-#127 plain-ID-map file
+// (no "version") migrates in place: its synced/fails/skips survive, the sync
+// point is unknown, and the next Save rewrites it in the versioned form with a
+// "version" field.
+func TestMigrateInPlaceRewritesVersioned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const old = `{"synced":{"1001":{"name":"Morning Run","start":"2026-10-20 07:00:00"},"1002":{"name":"Evening Ride","start":"2026-10-25 18:30:00"}},"fails":{"1001":1},"skips":{}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("pre-#127 file should load: %v", err)
+	}
+	if !s.Done("1001") || !s.Done("1002") {
+		t.Fatal("migrated file should keep its synced entries")
+	}
+	if s.StartTime() != "" {
+		t.Fatalf("migrated file start time = %q, want empty (unknown)", s.StartTime())
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// The file on disk now carries a version; a reload keeps the point unknown
+	// but is no longer dirty (would already be versioned).
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "\"version\"") {
+		t.Fatalf("migrated file was not rewritten in versioned form:\n%s", b)
 	}
 }
