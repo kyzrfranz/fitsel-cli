@@ -86,8 +86,9 @@ scoops:
       owner: kyzrfranz
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    # The zip archive built above is what Scoop installs; name_template must match it.
-    archive_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}.zip"
+    # No archive_template: GoReleaser's archives block (no name_template of its own)
+    # names the zip {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.zip, and
+    # Scoop auto-matches that by goos/goarch, so the manifest points at the real asset.
     ids:
       - build-fitsel-client
 
@@ -100,7 +101,7 @@ wingets:
     shortDescription: Sync Garmin activities to fitsel
     homepage: https://github.com/kyzrfranz/fitsel-cli
     license: MIT
-    url_template: "https://github.com/kyzrfranz/fitsel-cli/releases/download/{{ .Tag }}/{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}.zip"
+    url_template: "https://github.com/kyzrfranz/fitsel-cli/releases/download/{{ .Tag }}/{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.zip"
     skip_upload: true
     ids:
       - build-fitsel-client
