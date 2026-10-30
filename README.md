@@ -187,8 +187,13 @@ clear error naming the file — fix it, and the run will proceed.
 fitsel-client --since 2026-01-01
 ```
 
-The first run needs `--since` to set your start date. Each later run uploads
-everything pending since then. See "Exit codes" below for what a run reports.
+The first run needs `--since` to set your start date. Each later run omits it:
+the tool continues from the stored sync point (the start date of the newest
+activity synced so far), listing from that point minus a 2-day overlap and
+skipping what is already synced, so it picks up only what is new. Pass `--since`
+again only if you want to re-list from an earlier date — an explicit `--since`
+always wins over the stored point. See "Exit codes" below for what a run
+reports.
 
 A run prints a one-line summary at the end — how many activities synced and how
 many failed this run — so a schedule can tell success from a partial one:
@@ -204,7 +209,7 @@ It lists the pending activities and uploads nothing — no files are downloaded
 from Garmin, nothing is sent to fitsel, and nothing is marked synced:
 
 ```sh
-fitsel-client --since 2026-01-01 --dry-run
+fitsel-client --dry-run
 ```
 
 It prints something like:
@@ -277,7 +282,9 @@ and the fitsel upload. Unlike those, it is best-effort and never stops a sync.
 ### Optional flags
 
 - `--since <YYYY-MM-DD>` — only sync activities on or after this date. The first
-  run needs it to set your start date; later runs keep it.
+  run needs it to set your start date; later runs omit it and continue from the
+  stored point. Pass it again to re-list from an earlier date — an explicit
+  `--since` always wins over the stored point.
 - `--to <YYYY-MM-DD>` — only sync activities on or before this date. Combined
   with `--since` it restricts a sync to the window `[--since, --to]`; omit it for
   the open-ended upper bound (everything since `--since`). The date is forwarded
@@ -330,8 +337,11 @@ crontab -e
 ```
 
 ```
-0 20 * * * /opt/homebrew/bin/fitsel-client --since 2026-01-01 >> ~/.config/fitsel-client/sync.log 2>&1
+0 20 * * * /opt/homebrew/bin/fitsel-client >> ~/.config/fitsel-client/sync.log 2>&1
 ```
+
+The first scheduled run once sets the start date with `--since YYYY-MM-DD`;
+after that it continues on its own, so omit the flag in the scheduled entry.
 
 Use the full path to the binary, since cron does not load your shell's `PATH`.
 `which fitsel-client` prints it: `/opt/homebrew/bin/fitsel-client` for Homebrew
@@ -347,7 +357,7 @@ Description=fitsel-client
 
 [Service]
 Type=oneshot
-ExecStart=/home/linuxbrew/.linuxbrew/bin/fitsel-client --since 2026-01-01
+ExecStart=/home/linuxbrew/.linuxbrew/bin/fitsel-client
 ```
 
 ```ini
@@ -372,8 +382,11 @@ systemctl --user enable --now fitsel-client.timer
 On Windows, create a daily task in Task Scheduler. From a command prompt:
 
 ```bat
-schtasks /create /tn "fitsel-client" /tr "C:\path\to\fitsel-client.exe --since 2026-01-01" /sc daily /st 20:00
+schtasks /create /tn "fitsel-client" /tr "C:\path\to\fitsel-client.exe" /sc daily /st 20:00
 ```
+
+The first scheduled run once sets the start date with `--since YYYY-MM-DD`;
+after that it continues on its own, so omit the flag in the scheduled task.
 
 Run it daily after you've trained. A run exits `0` on success, or a non-zero code
 (see below) on a problem.

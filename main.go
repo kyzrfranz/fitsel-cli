@@ -260,10 +260,16 @@ func runWithCtx(ctx context.Context, args []string) error {
 	}
 
 	if *since == "" {
-		// First run: without --since, nothing is listed yet. Later stories
-		// default this to a sensible start date; here the athlete must pass
-		// --since on the first run.
-		return errors.New("first run: pass --since YYYY-MM-DD to set the start date")
+		// Not the first run with an explicit --since: the stored sync point
+		// decides the list start. An empty point (a brand-new state, or a
+		// pre-#127 file that migrated in place with no known point) is treated
+		// exactly like a first run: require --since rather than listing all
+		// history since the start of time.
+		start := st.StartTime()
+		if start == "" {
+			return errors.New("first run: pass --since YYYY-MM-DD to set the start date")
+		}
+		*since = parseDateOrEarlier(start)
 	}
 
 	acts, err := gar.List(ctx, *since, *to)
@@ -296,6 +302,22 @@ func runWithCtx(ctx context.Context, args []string) error {
 	synced, failed, partial, err := syncActivities(ctx, gar, up, st, pending)
 	if err != nil {
 		return err
+	}
+	// Lock the sync point after a real sync of at least one activity: the
+	// newest activity's start date seen this run becomes the point a later
+	// --since-less run lists from. Never lower it. A dry-run never reaches
+	// here, so a preview never skips an upload you then make.
+	if len(pending) > 0 {
+		var newest string
+		for _, a := range pending {
+			if d := a.StartGMT[:10]; newest == "" || d > newest {
+				newest = d
+			}
+		}
+		st.AdvanceStartIfLater(newest)
+		if err := st.Save(); err != nil {
+			return fmt.Errorf("saving state: %w", err)
+		}
 	}
 	// List any activities the run left skipped (they failed too many times), so
 	// the athlete knows what is no longer being retried and how to revive them.
@@ -447,6 +469,19 @@ func parseDate(s string) (time.Time, error) {
 		return time.Time{}, errors.New("want a calendar date YYYY-MM-DD")
 	}
 	return t, nil
+}
+
+// parseDateOrEarlier returns the start date a --since-less run lists from: the
+// stored sync point minus a 2-day overlap, so an activity synced at the tail of
+// the last window is not skipped. The overlap is a safety margin, not a bound:
+// the client still skips anything already synced, so a wider window only costs
+// one extra page, never a missed upload.
+func parseDateOrEarlier(start string) string {
+	t, err := time.Parse("2006-01-02", start)
+	if err != nil {
+		return start
+	}
+	return t.AddDate(0, 0, -2).Format("2006-01-02")
 }
 
 // initCommand is the interactive setup subcommand: it walks the athlete through
