@@ -1784,7 +1784,7 @@ func TestDoctorInitOfferNoSecret(t *testing.T) {
 
 // TestDefaultStatePathIsUsedWithoutStateFlag is the acceptance check for #127:
 // with no -state flag, the run reads and writes the default
-// ~/.config/garmin-sync/state.json, so a second run uploads nothing. HOME is
+// ~/.config/fitsel-client/state.json, so a second run uploads nothing. HOME is
 // pointed at a temp dir so the default path lands in a throwaway location; the
 // tool is driven exactly as an athlete would run it, with no -state at all.
 func TestDefaultStatePathIsUsedWithoutStateFlag(t *testing.T) {
@@ -1819,7 +1819,7 @@ func TestDefaultStatePathIsUsedWithoutStateFlag(t *testing.T) {
 	}
 
 	// The default state file must have been written next to the config dir.
-	wantPath := filepath.Join(dir, ".config", "garmin-sync", "state.json")
+	wantPath := filepath.Join(dir, ".config", "fitsel-client", "state.json")
 	if _, err := os.Stat(wantPath); err != nil {
 		t.Fatalf("default state file not written at %s: %v", wantPath, err)
 	}

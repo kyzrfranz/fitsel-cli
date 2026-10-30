@@ -109,9 +109,9 @@ file second — an environment variable wins over the file for each key:
 If any are missing, the tool writes a sample config file at the path below so
 you know where to put them. Secrets are never logged or printed.
 
-The config file lives at `~/.config/garmin-sync/config.json` (on Linux and
-macOS; the directory keeps the tool's earlier name), mode `0600` (readable only by you); its directory is mode `0700`. Set
-`FITSEL_CONFIG` to use a different file. Edit it by hand:
+The config file lives at `~/.config/fitsel-client/config.json` (mode `0600`,
+readable only by you); its directory is mode `0700`. Set `FITSEL_CONFIG` to use
+a different file. Edit it by hand:
 
 ```json
 {"garmin_api_key":"<create one at developer.garmin.com>",
@@ -169,7 +169,7 @@ When the list looks right, run it again without `--dry-run` to upload.
   to Garmin's list API, so a narrow window is listed in full and never truncated
   at the old 100-activity cap.
 - `--state <path>` — where to keep the state file (which activities are synced).
-  Default: `~/.config/garmin-sync/state.json`.
+  Default: `~/.config/fitsel-client/state.json`.
 - `--fitsel-endpoint <url>` — the fitsel webhook base URL. The upload goes to
   `<base>/<FITSEL_TOKEN>`, so this overrides only the base, never the token.
   Default: `https://ingest.fitsel.app/ingest/wh`.
@@ -213,7 +213,7 @@ crontab -e
 ```
 
 ```
-0 20 * * * /opt/homebrew/bin/fitsel-client --since 2026-01-01 >> ~/.config/garmin-sync/sync.log 2>&1
+0 20 * * * /opt/homebrew/bin/fitsel-client --since 2026-01-01 >> ~/.config/fitsel-client/sync.log 2>&1
 ```
 
 Use the full path to the binary, since cron does not load your shell's `PATH`.

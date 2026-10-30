@@ -25,9 +25,9 @@ func stateDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".config", "garmin-sync")
+		return "fitsel-client"
 	}
-	return filepath.Join(home, ".config", "garmin-sync")
+	return filepath.Join(home, ".config", "fitsel-client")
 }
 
 // Path returns the location of the default state file, honoring $FITSEL_STATE
@@ -65,7 +65,7 @@ const skipThreshold = 3
 //
 // An empty path is not "no state": it resolves to the default location, so a
 // run that never passes --state still reads and, on Save, writes the documented
-// ~/.config/garmin-sync/state.json. That is what makes repeated runs idempotent
+// ~/.config/fitsel-client/state.json. That is what makes repeated runs idempotent
 // by default (per #127): before this, Load("") returned a state whose Save() was
 // a no-op, so the state file was never written and every run re-uploaded.
 func Load(path string) (*State, error) {
