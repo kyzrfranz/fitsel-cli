@@ -1,8 +1,10 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIdempotentMarkAndSave(t *testing.T) {
@@ -14,7 +16,7 @@ func TestIdempotentMarkAndSave(t *testing.T) {
 	if s.Done("1001") {
 		t.Fatal("fresh state should not have 1001")
 	}
-	s.MarkDone("1001")
+	s.MarkDone("1001", "Morning Run", "2026-10-20 07:00:00")
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +115,7 @@ func TestSkippedActivityNotCountedOnceSynced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.MarkDone("1001")
+	s.MarkDone("1001", "Morning Run", "2026-10-20 07:00:00")
 	if s.Fail("1001") {
 		t.Fatal("a synced activity should not accrue fail counts")
 	}
@@ -183,5 +185,102 @@ func TestSkipsListsSkipped(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("Skips() = %v, want exactly 2 entries", s.Skips())
+	}
+}
+
+// TestMarkDoneStoresMetadataAndLastSynced proves the new shape: MarkDone records
+// the activity's name and start, and the first MarkDone of a run stamps the
+// run-level last-synced time. status reports these offline.
+func TestMarkDoneStoresMetadataAndLastSynced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.lastSyncedAt.IsZero() {
+		t.Fatal("fresh state should have no last-synced time")
+	}
+	s.MarkDone("1001", "Morning Run", "2026-10-20 07:00:00")
+	s.MarkDone("1002", "Evening Ride", "2026-10-25 18:30:00")
+
+	id, meta := s.NewestSynced()
+	if id != "1002" {
+		t.Fatalf("newest synced = %s, want 1002 (latest start)", id)
+	}
+	if meta.Name != "Evening Ride" {
+		t.Fatalf("newest name = %q, want Evening Ride", meta.Name)
+	}
+	if meta.Start != "2026-10-25 18:30:00" {
+		t.Fatalf("newest start = %q, want 2026-10-25 18:30:00", meta.Start)
+	}
+	if s.LastSyncedAt().IsZero() {
+		t.Fatal("after the first MarkDone, last-synced time should be set")
+	}
+	if got := s.SyncedCount(); got != 2 {
+		t.Fatalf("SyncedCount() = %d, want 2", got)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLastSyncedStampsOncePerRun proves the run-level last-synced time is
+// stamped once per run (on the first MarkDone), not on every activity.
+func TestLastSyncedStampsOncePerRun(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MarkDone("1001", "Morning Run", "2026-10-20 07:00:00")
+	first := s.LastSyncedAt()
+	time.Sleep(2 * time.Millisecond)
+	s.MarkDone("1002", "Evening Ride", "2026-10-25 18:30:00")
+	if !s.LastSyncedAt().Equal(first) {
+		t.Fatal("last-synced time should be stamped once per run, not per activity")
+	}
+}
+
+// TestBackwardCompatOldBoolShape proves an old state file with bare-boolean
+// synced entries ({"1001": true}) still loads and counts toward the total,
+// just with no name/date to display.
+func TestBackwardCompatOldBoolShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const old = `{"synced":{"1001":true,"1002":true},"fails":{},"skips":{}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("old bool shape should load without error: %v", err)
+	}
+	if !s.Done("1001") || !s.Done("1002") {
+		t.Fatal("old bool entries should count as done")
+	}
+	if got := s.SyncedCount(); got != 2 {
+		t.Fatalf("SyncedCount() = %d, want 2", got)
+	}
+	// No start recorded, so NewestSynced returns no name/date to display.
+	id, meta := s.NewestSynced()
+	if id != "" {
+		t.Fatalf("old shape has no start, so newest id should be empty, got %q", id)
+	}
+	if meta.Name != "" || meta.Start != "" {
+		t.Fatalf("old shape has no metadata, got %+v", meta)
+	}
+}
+
+// TestNewestSyncedNoStartSortsLast proves an activity with no recorded start is
+// never reported as newest over one that has a date.
+func TestNewestSyncedNoStartSortsLast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const old = `{"synced":{"1001":{"name":"No Start","start":""},"1002":{"name":"With Start","start":"2026-10-25 18:30:00"}}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Load(path)
+	id, meta := s.NewestSynced()
+	if id != "1002" {
+		t.Fatalf("newest = %q (%s), want 1002 (With Start)", id, meta.Name)
 	}
 }

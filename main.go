@@ -155,6 +155,9 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "doctor" {
 		return runDoctor(os.Stdin, os.Stdout, args[1:])
 	}
+	if len(args) > 0 && args[0] == "status" {
+		return runStatus(os.Stdin, os.Stdout, args[1:])
+	}
 
 	// A Ctrl-C (SIGINT) or SIGTERM stops the run cleanly: the derived context
 	// reaches the sync loop, so an in-flight download or upload returns instead
@@ -375,8 +378,11 @@ func syncActivities(ctx context.Context, gar *garmin.Client, up *fitsel.Client, 
 		_ = accepted // Upload returns nil only on 202; a nil error means success.
 		synced++
 		// Persist immediately: an activity uploaded before the stop stays
-		// saved even if the run is stopped on the next activity.
-		st.MarkDone(id)
+		// saved even if the run is stopped on the next activity. MarkDone also
+		// records the activity's name and start, and stamps the run-level
+		// last-synced time on the first activity of the run, so `status` can
+		// report these offline.
+		st.MarkDone(id, a.Name, a.StartGMT)
 		if err := st.Save(); err != nil {
 			return 0, 0, false, fmt.Errorf("saving state: %w", err)
 		}
@@ -597,5 +603,111 @@ func runDoctor(in io.Reader, out io.Writer, args []string) error {
 			return errors.New("doctor: setup incomplete, fix the checks above")
 		}
 	}
+	return nil
+}
+
+// runStatus is the `fitsel-client status` subcommand: an offline health check
+// of the last syncs. With no flags it prints, exits 0, and touches NO network —
+// it builds no gar client at all, so the newest synced activity's name/date and
+// the last synced time come purely from the persisted state. `status --pending`
+// is the only mode that touches the network: it mirrors --dry-run, listing what
+// a sync would upload (what Garmin serves that is not already done), uploading
+// nothing and leaving state byte-for-byte unchanged.
+//
+// It never prints a secret value: it reports the config file *path* only, never
+// its contents or keys, mirroring doctor's no-secret discipline.
+//
+// It takes its input and output as arguments so tests can read the report
+// in-process, with no real network and no real terminal.
+func runStatus(in io.Reader, out io.Writer, args []string) error {
+	fs := flag.NewFlagSet("fitsel-client status", flag.ContinueOnError)
+	statePath := fs.String("state", "", "path to the state file (default: "+state.Path()+")")
+	pending := fs.Bool("pending", false, "list what a sync would upload, upload nothing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *statePath == "" {
+		*statePath = state.Path()
+	}
+
+	// The report is the same shape whether or not --pending is given, so build
+	// it once. It never loads the config's contents or keys: only the config
+	// *path* is printed (matching doctor's no-secret rule), so we stat the path
+	// to report it and load the state to report sync history.
+	//
+	// The config path is reported even when the config is unreadable: the path
+	// is not a secret, and the athlete needs to know where their config is.
+	// Its contents are never printed.
+
+	// Load the state to report sync history. A missing state file is an empty
+	// state, so "never synced yet" renders cleanly.
+	st, err := state.Load(*statePath)
+	if err != nil {
+		return fmt.Errorf("loading state: %w", err)
+	}
+
+	// Print the offline report: config path, state path, last synced, newest
+	// synced activity, and synced count. No secret value — only paths.
+	fmt.Fprintf(out, "config: %s\n", config.Path())
+	fmt.Fprintf(out, "state: %s\n", *statePath)
+	if st.LastSyncedAt().IsZero() {
+		fmt.Fprintln(out, "last synced: never synced yet")
+	} else {
+		fmt.Fprintf(out, "last synced: %s\n", st.LastSyncedAt().Format("2006-01-02 15:04:05"))
+	}
+	if id, meta := st.NewestSynced(); id != "" {
+		fmt.Fprintf(out, "newest synced activity: %s (%s)\n", meta.Name, meta.Start)
+	} else {
+		fmt.Fprintln(out, "newest synced activity: none")
+	}
+	fmt.Fprintf(out, "activities synced so far: %d\n", st.SyncedCount())
+
+	// --pending is the only mode that touches the network. It mirrors --dry-run
+	// exactly: build a gar client, list what would be uploaded, upload nothing.
+	// It does NOT build a fitsel client, so no upload is sent.
+	if !*pending {
+		return nil
+	}
+
+	// --pending needs credentials to authenticate with Garmin. Load them; a
+	// missing config is a clean error, not a crash. The secrets are never
+	// printed — only used to build the gar client.
+	creds, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	gar := garmin.New(creds.GarminKey)
+	gar.SetBaseURL(garminBaseURL)
+	gar.RetryAfter = garmin.RetryAfterDelay
+	if _, err := gar.Authorize(context.Background()); err != nil {
+		return fmt.Errorf("authenticating with Garmin: %w", err)
+	}
+
+	// List everything Garmin serves that is not already done, with no lower
+	// bound: a health check wants to see everything pending, not just what a
+	// --since window would have synced.
+	acts, err := gar.List(context.Background(), "", "")
+	if err != nil {
+		return fmt.Errorf("listing activities: %w", err)
+	}
+
+	var pendingActs []garmin.Activity
+	for _, a := range acts {
+		if !st.Done(itoa(a.ID)) {
+			pendingActs = append(pendingActs, a)
+		}
+	}
+
+	fmt.Fprintln(out, "pending:")
+	if len(pendingActs) == 0 {
+		fmt.Fprintln(out, "  nothing to sync — up to date")
+		return nil
+	}
+	for _, a := range pendingActs {
+		fmt.Fprintf(out, "  - %s (%s)\n", a.Name, itoa(a.ID))
+	}
+	// State is loaded but never Saved: --pending uploads nothing and changes
+	// nothing, so the state file is byte-for-byte unchanged.
 	return nil
 }

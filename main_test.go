@@ -1782,6 +1782,257 @@ func TestDoctorInitOfferNoSecret(t *testing.T) {
 	}
 }
 
+// TestStatusNeverTouchesNetwork proves the offline health check builds no gar
+// client at all: against a fake Garmin that counts requests, a plain `status`
+// (no --pending) makes zero requests to it, even though the fake is up.
+func TestStatusNeverTouchesNetwork(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	garminBaseURL = gar.URL()
+	t.Cleanup(func() { garminBaseURL = garmin.BaseURL })
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-state", statePath}); err != nil {
+		t.Fatalf("status: %v\nREPORT:\n%s", err, out.String())
+	}
+	if gar.Tokens != 0 {
+		t.Fatalf("status made network requests (%d tokens issued); it must touch no network", gar.Tokens)
+	}
+}
+
+// TestStatusOfflineReport proves the offline report renders the persisted
+// quantities: config path, state path, last synced time, newest synced activity
+// by name+date, and the synced count. It loads a new-schema state and asserts
+// each line renders.
+func TestStatusOfflineReport(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// Write a new-schema state: two activities synced, with the run-level
+	// last-synced time and per-activity metadata.
+	meta := `{"synced":{"1001":{"name":"Morning Run","start":"2026-10-20 07:00:00"},"1002":{"name":"Evening Ride","start":"2026-10-25 18:30:00"}},"fails":{},"skips":{},"lastSyncedAt":"2026-10-25T18:30:05Z"}`
+	if err := os.WriteFile(statePath, []byte(meta), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-state", statePath}); err != nil {
+		t.Fatalf("status: %v\nREPORT:\n%s", err, out.String())
+	}
+	report := out.String()
+	for _, want := range []string{
+		"config: ",
+		"state: " + statePath,
+		"last synced: 2026-10-25 18:30:05",
+		"newest synced activity: Evening Ride (2026-10-25 18:30:00)",
+		"activities synced so far: 2",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("status output missing %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestStatusNeverSynced proves the "never synced yet" line renders when the
+// state is empty, and the report still exits 0.
+func TestStatusNeverSynced(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json") // absent
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-state", statePath}); err != nil {
+		t.Fatalf("status: %v\nREPORT:\n%s", err, out.String())
+	}
+	report := out.String()
+	if !strings.Contains(report, "last synced: never synced yet") {
+		t.Fatalf("expected a never-synced line, got:\n%s", report)
+	}
+	if !strings.Contains(report, "newest synced activity: none") {
+		t.Fatalf("expected a 'none' newest line, got:\n%s", report)
+	}
+	if !strings.Contains(report, "activities synced so far: 0") {
+		t.Fatalf("expected zero count, got:\n%s", report)
+	}
+}
+
+// TestStatusOldStateFormatStillReports proves an old {true}-format state file
+// still reports the synced count without error, just with no name/date to
+// display.
+func TestStatusOldStateFormatStillReports(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	const old = `{"synced":{"1001":true,"1002":true},"fails":{},"skips":{}}`
+	if err := os.WriteFile(statePath, []byte(old), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-state", statePath}); err != nil {
+		t.Fatalf("status: %v\nREPORT:\n%s", err, out.String())
+	}
+	report := out.String()
+	if !strings.Contains(report, "activities synced so far: 2") {
+		t.Fatalf("expected count 2 from old format, got:\n%s", report)
+	}
+	if !strings.Contains(report, "newest synced activity: none") {
+		t.Fatalf("old format has no start, so newest should be none, got:\n%s", report)
+	}
+}
+
+// TestStatusNoSecretLeaked proves no secret value ever appears in the status
+// output, even though the config holds real secrets. status prints the config
+// path only, never its contents.
+func TestStatusNoSecretLeaked(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	var out bytes.Buffer
+	_ = runStatus(strings.NewReader(""), &out, []string{"-state", statePath})
+	report := out.String()
+	for _, secret := range []string{doctorGarminKey, doctorFitselTok, doctorFitselPass} {
+		if strings.Contains(report, secret) {
+			t.Fatalf("status leaked a secret into output: %q\n%s", secret, report)
+		}
+	}
+}
+
+// TestStatusPendingListsWhatWouldUpload mirrors TestDryRunUploadsNothing: it
+// lists what a sync would upload, uploads nothing, and leaves state
+// byte-for-byte unchanged. It builds a gar client (so it touches the network
+// once) but never a fitsel client.
+func TestStatusPendingListsWhatWouldUpload(t *testing.T) {
+	useFastDelays(t)
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// A present, empty state: nothing synced yet.
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("reading state: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-pending", "-state", statePath}); err != nil {
+		t.Fatalf("status --pending: %v\nREPORT:\n%s", err, out.String())
+	}
+	report := out.String()
+	for _, want := range []string{
+		"- Morning Run (1001)",
+		"- Evening Ride (1002)",
+		"- Weekend Hike (1003)",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("status --pending output missing %q:\n%s", want, report)
+		}
+	}
+	// Nothing was uploaded: status --pending builds no fitsel client.
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("status --pending uploaded %d files; it must upload nothing", len(fits.Uploadees))
+	}
+	// State is byte-for-byte unchanged: no activity marked synced.
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("reading state: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("status --pending changed the state file:\nbefore: %s\nafter:  %s", before, after)
+	}
+	// No file was downloaded from Garmin either: it only listed.
+	if gar.Downloads != 0 {
+		t.Fatalf("status --pending downloaded %d files; it must only list", gar.Downloads)
+	}
+}
+
+// TestStatusPendingUpToDate proves that when everything is already synced,
+// status --pending reports nothing to sync and still touches no fitsel.
+func TestStatusPendingUpToDate(t *testing.T) {
+	writeDoctorConfig(t, map[string]string{
+		"garmin_api_key": doctorGarminKey,
+		"fitsel_token":   doctorFitselTok,
+		"fitsel_passkey": doctorFitselPass,
+	})
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	// All three already synced.
+	meta := `{"synced":{"1001":{"name":"Morning Run","start":"2026-10-20 07:00:00"},"1002":{"name":"Evening Ride","start":"2026-10-25 18:30:00"},"1003":{"name":"Weekend Hike","start":"2026-10-27 09:15:00"}},"fails":{},"skips":{}}`
+	if err := os.WriteFile(statePath, []byte(meta), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	var out bytes.Buffer
+	if err := runStatus(strings.NewReader(""), &out, []string{"-pending", "-state", statePath}); err != nil {
+		t.Fatalf("status --pending: %v\nREPORT:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "nothing to sync — up to date") {
+		t.Fatalf("expected up-to-date line, got:\n%s", out.String())
+	}
+	if len(fits.Uploadees) != 0 {
+		t.Fatalf("status --pending uploaded %d files; it must upload nothing", len(fits.Uploadees))
+	}
+}
+
 // TestDefaultStatePathIsUsedWithoutStateFlag is the acceptance check for #127:
 // with no -state flag, the run reads and writes the default
 // ~/.config/fitsel-client/state.json, so a second run uploads nothing. HOME is

@@ -159,6 +159,40 @@ It prints something like:
 
 When the list looks right, run it again without `--dry-run` to upload.
 
+### Check sync status
+
+A quick, offline health check of your last syncs with `status`. It prints the
+config path, state path, last successful sync time, the newest synced activity
+by name and date, and how many activities are synced so far — with **no network
+at all** (no Garmin client is built):
+
+```sh
+fitsel-client status
+```
+
+```
+config: /home/you/.config/fitsel-client/config.json
+state: /home/you/.config/fitsel-client/state.json
+last synced: 2026-10-25 18:30:05
+newest synced activity: Evening Ride (2026-10-25 18:30:00)
+activities synced so far: 2
+```
+
+Nothing is synced yet:
+
+```
+config: /home/you/.config/fitsel-client/config.json
+state: /home/you/.config/fitsel-client/state.json
+last synced: never synced yet
+newest synced activity: none
+activities synced so far: 0
+```
+
+It reports the config file *path* only — never its contents or keys — so it is
+safe to run anywhere. `status --pending` is the only mode that touches the
+network, and it mirrors `--dry-run`: it lists what a sync would upload, uploads
+nothing, and leaves the state file unchanged.
+
 ### Optional flags
 
 - `--since <YYYY-MM-DD>` — only sync activities on or after this date. The first
