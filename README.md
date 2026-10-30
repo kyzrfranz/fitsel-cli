@@ -36,19 +36,73 @@ fitsel-client --version
 
 Upgrade to a newer release with `brew upgrade fitsel-client`.
 
+### Linux (apt / dnf)
+
+There is a `.deb` for Debian/Ubuntu and an `.rpm` for Fedora/RHEL in every
+release. Download the one for your OS and architecture from
+<https://github.com/kyzrfranz/fitsel-cli/releases>, then install it:
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./fitsel-client_<version>_linux_<arch>.deb
+
+# Fedora / RHEL
+sudo dnf install ./fitsel-client_<version>_linux_<arch>.rpm
+```
+
+The package installs `fitsel-client` to `/usr/local/bin`, so it is on your `PATH`
+immediately. Verify with `fitsel-client --version`. Find the exact file name on
+the releases page — it follows the pattern
+`fitsel-client_<version>_linux_<arch>.{deb,rpm}` (e.g.
+`fitsel-client_1.2.0_linux_amd64.deb`).
+
 ### Download a release
 
 Every release is published at
 <https://github.com/kyzrfranz/fitsel-cli/releases> with an archive for each
 platform (macOS, Linux and Windows; amd64 and arm64) and a `checksums.txt`.
-Download the one for your platform, unpack it, and put `fitsel-client` (or
-`fitsel-client.exe` on Windows) somewhere on your `PATH`.
+
+Check the checksum before you run anything: download the archive and the
+`checksums.txt` from the same release, then verify. On macOS and Linux:
+
+```sh
+sha256sum -c checksums.txt
+```
+
+On Windows (PowerShell):
+
+```powershell
+Get-FileHash .\fitsel-client_<version>_windows_<arch>.tar.gz -Algorithm SHA256
+```
+
+Compare the hash against the line for your file in `checksums.txt`. Then unpack
+the archive and put `fitsel-client` (or `fitsel-client.exe` on Windows) somewhere
+on your `PATH`:
+
+- macOS — `/usr/local/bin` or `~/local/bin`
+- Linux — `/usr/local/bin` or `~/.local/bin`
+- Windows — a folder on your `PATH`, e.g. `C:\Users\You\local\bin`
 
 ### Build from source
 
 ```sh
 go build -o fitsel-client .
 ```
+
+### Windows (Scoop / winget)
+
+Windows installs via Scoop or winget once the release manifest ships. It is
+published by GoReleaser as part of the release workflow (task #155); until that
+is out, use the direct-download archive above. When it lands, install with:
+
+```sh
+scoop install kyzrfranz/fitsel-client
+# or
+winget install kyzrfranz.fitsel-client
+```
+
+These commands are future-only — the manifest does not exist yet (#155), so do
+not run them before then; use the direct-download archive above.
 
 ## 2. Create the Garmin key
 
