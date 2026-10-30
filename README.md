@@ -9,6 +9,11 @@ athlete's machine (Garmin's Personal API is "not intended for commercial
 applications serving multiple end users"). That is also why there is no server to
 run and no refresh token to manage — the key stays on the athlete's machine.
 
+The tool makes only three outbound calls from your machine, and nothing else
+leaves it: fetching your activities from Garmin (`personal.connectapi.garmin.com`),
+uploading them to fitsel (`ingest.fitsel.app`), and this daily release check
+(api.github.com). There is no server to reach and no other network.
+
 ## Setup
 
 Follow these six steps in order:
