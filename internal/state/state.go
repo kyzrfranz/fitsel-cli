@@ -283,7 +283,10 @@ func (s *State) StartTime() string { return s.start }
 // called after a real sync of at least one activity, with the newest activity's
 // start date seen this run (List returns newest first, so that is acts[0]).
 func (s *State) AdvanceStartIfLater(d string) {
-	if d == "" || s.start == "" || d > s.start {
+	if d == "" || s.start == "" {
+		return
+	}
+	if d > s.start {
 		s.start = d
 	}
 }
@@ -304,18 +307,18 @@ func (s *State) Save() error {
 		return err
 	}
 	data := struct {
-		Version      *int                      `json:"version"`
-		StartTime    string                    `json:"start_time"`
-		Synced       map[string]SyncMeta       `json:"synced"`
-		Fails        map[string]int            `json:"fails"`
-		Skips        map[string]bool           `json:"skips"`
-		LastSyncedAt string                    `json:"lastSyncedAt"`
+		Version      *int                `json:"version"`
+		StartTime    string              `json:"start_time"`
+		Synced       map[string]SyncMeta `json:"synced"`
+		Fails        map[string]int      `json:"fails"`
+		Skips        map[string]bool     `json:"skips"`
+		LastSyncedAt string              `json:"lastSyncedAt"`
 	}{
-		Version:      intPtr(StateVersion),
-		StartTime:    s.start,
-		Synced:       s.synced,
-		Fails:        s.fails,
-		Skips:        s.skips,
+		Version:   intPtr(StateVersion),
+		StartTime: s.start,
+		Synced:    s.synced,
+		Fails:     s.fails,
+		Skips:     s.skips,
 	}
 	if !s.lastSyncedAt.IsZero() {
 		data.LastSyncedAt = s.lastSyncedAt.Format(time.RFC3339)
