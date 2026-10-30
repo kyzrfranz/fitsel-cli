@@ -11,6 +11,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -544,6 +545,27 @@ func initCommand(in io.Reader, out io.Writer, args []string) error {
 	if _, err := fmt.Fprintln(out, "Run 'fitsel-client doctor' to verify this setup."); err != nil {
 		return err
 	}
+
+	// Offer the optional Personal API key expiry: it is a non-secret calendar
+	// date, so we ask for it only after the three required secrets are saved
+	// (a blank line skips it, matching AC2's "blank allowed"). Validate before
+	// writing, so a bad date is reported and nothing is changed.
+	if _, err := fmt.Fprintln(out, "Personal API key expiry date (YYYY-MM-DD), or blank to skip:"); err != nil {
+		return err
+	}
+	expiryLine, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("reading your key expiry: %w", err)
+	}
+	expiryLine = trimNewline(expiryLine)
+	if expiryLine != "" {
+		if _, setErr := creds.SetPersonalAPIKeyExpiry(expiryLine); setErr != nil {
+			return fmt.Errorf("key expiry not stored (use --set-key-expiry=YYYY-MM-DD): %w", setErr)
+		}
+		if _, err := fmt.Fprintln(out, "Key expiry recorded; run 'fitsel-client doctor' to see it."); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -570,9 +592,11 @@ func trimNewline(s string) string {
 // secret value: it reports only the presence or absence of each key, never the
 // key itself, and never echoes any field of the loaded credentials.
 func runDoctor(in io.Reader, out io.Writer, args []string) error {
-	// Doctor takes one flag, mirroring the sync -state flag's default.
+	// Doctor takes two flags: the -state flag mirroring the sync default, and
+	// --set-key-expiry to store/change the Personal API key expiry date.
 	fs := flag.NewFlagSet("fitsel-client doctor", flag.ContinueOnError)
 	statePath := fs.String("state", "", "path to the state file (default: "+state.Path()+")")
+	setKeyExpiry := fs.String("set-key-expiry", "", "store/change the Personal API key expiry date (YYYY-MM-DD)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -580,6 +604,27 @@ func runDoctor(in io.Reader, out io.Writer, args []string) error {
 	// same file a sync would use.
 	if *statePath == "" {
 		*statePath = state.Path()
+	}
+
+	// --set-key-expiry=<YYYY-MM-DD>: validate BEFORE anything is written, so a
+	// rejected set changes nothing (the prior value stays intact, the file stays
+	// valid JSON, no empty value is written). On success it stores the date and
+	// reports only that it was set -- never the value. A bad date is a clear
+	// error and a non-zero exit (mapped by main). This path never builds a
+	// client or touches a network.
+	//
+	// It deliberately does NOT go through config.Load(): Load gates on the three
+	// secrets being present (a fresh or partially-filled config would error) and
+	// writes a placeholder file on that error. SetPersonalAPIKeyExpiry instead
+	// reads the file as-is, sets only the expiry field, and writes it back, so
+	// it works on its own and preserves whatever else is there (AC3).
+	if *setKeyExpiry != "" {
+		var creds config.Credentials
+		if _, setErr := creds.SetPersonalAPIKeyExpiry(*setKeyExpiry); setErr != nil {
+			return fmt.Errorf("--set-key-expiry: %w", setErr)
+		}
+		fmt.Fprintln(out, "key-expiry set")
+		return nil
 	}
 
 	// All checks share one pass over the output: each returns a line and a
@@ -664,6 +709,21 @@ func runDoctor(in io.Reader, out io.Writer, args []string) error {
 		return err
 	}
 
+	// The Personal API key expiry is informational only: it reports presence
+	// or absence (never the value, which is non-secret but kept out of output)
+	// and a usage hint, and never affects the exit code -- a fresh machine with
+	// no expiry still exits 0. It is read from the same file via a raw load so
+	// it reports even when the three secrets are absent.
+	if expiry, err := loadKeyExpiry(); err == nil && expiry != "" {
+		if _, err := fmt.Fprintln(out, "key-expiry: set (use --set-key-expiry=YYYY-MM-DD to change)"); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintln(out, "key-expiry: none set (use --set-key-expiry=YYYY-MM-DD)"); err != nil {
+			return err
+		}
+	}
+
 	// Print the report in order, then decide the exit code. Every line printed
 	// to out is a check result or the fixed fitsel line — no secret value,
 	// since every line reports only presence/absence or a resolved path.
@@ -677,6 +737,25 @@ func runDoctor(in io.Reader, out io.Writer, args []string) error {
 		}
 	}
 	return nil
+}
+
+// loadKeyExpiry reads only the stored Personal API key expiry date from the
+// config file, without the missing-secrets gate Load applies, so a fresh or
+// partially-filled config still reports its expiry. It returns "" when none is
+// set or the file is absent/unreadable.
+func loadKeyExpiry() (string, error) {
+	var c config.Credentials
+	b, err := os.ReadFile(config.Path())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return "", err
+	}
+	return c.PersonalAPIKeyExpiry, nil
 }
 
 // runStatus is the `fitsel-client status` subcommand: an offline health check

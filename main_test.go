@@ -1679,6 +1679,123 @@ func TestDoctorMissingConfig(t *testing.T) {
 	}
 }
 
+// TestDoctorSetExpiryThenReports proves the doctor --set-key-expiry CLI path:
+// it stores the date (AC1/AC2), the value is never printed to output, and a
+// subsequent doctor run reports the expiry is set without leaking it.
+func TestDoctorSetExpiryThenReports(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", path)
+
+	// Set on a fresh config (no secrets present): must succeed on its own.
+	var setOut bytes.Buffer
+	if err := runDoctor(strings.NewReader(""), &setOut, []string{"--set-key-expiry=2026-12-31"}); err != nil {
+		t.Fatalf("--set-key-expiry: %v\nREPORT:\n%s", err, setOut.String())
+	}
+	if got := strings.TrimSpace(setOut.String()); got != "key-expiry set" {
+		t.Fatalf("set output = %q, want %q", got, "key-expiry set")
+	}
+	// The value must never appear in the set confirmation.
+	if strings.Contains(setOut.String(), "2026-12-31") {
+		t.Fatalf("set output leaked the date value:\n%s", setOut.String())
+	}
+
+	// A subsequent doctor run reports the expiry is set, without the value.
+	// Use a valid config + fake garmin so the run passes (exit 0). Write the
+	// config directly with the fake key and the stored expiry.
+	var report bytes.Buffer
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+	cfg := fmt.Sprintf(`{"garmin_api_key":"%s","fitsel_token":"%s","fitsel_passkey":"%s","personal_api_key_expiry":"2026-12-31"}`,
+		doctorGarminKey, doctorFitselTok, doctorFitselPass)
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	garminBaseURL = gar.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+	})
+	if err := runDoctor(strings.NewReader(""), &report, []string{"-state", statePath}); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	r := report.String()
+	if !strings.Contains(r, "key-expiry: set") {
+		t.Fatalf("expected a set report, got:\n%s", r)
+	}
+	if strings.Contains(r, "2026-12-31") {
+		t.Fatalf("doctor report leaked the date value:\n%s", r)
+	}
+}
+
+// TestDoctorSetExpiryRejectsGarbageNoChange proves AC3 at the CLI level: a bad
+// date is rejected, exits non-zero, and changes nothing.
+func TestDoctorSetExpiryRejectsGarbageNoChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", path)
+
+	// A valid date already stored.
+	var setOut bytes.Buffer
+	if err := runDoctor(strings.NewReader(""), &setOut, []string{"--set-key-expiry=2026-03-03"}); err != nil {
+		t.Fatalf("initial set: %v", err)
+	}
+
+	var badOut bytes.Buffer
+	err := runDoctor(strings.NewReader(""), &badOut, []string{"--set-key-expiry=2026-13-99"})
+	if err == nil {
+		t.Fatal("expected a non-zero error on a garbage date")
+	}
+	if got := strings.TrimSpace(badOut.String()); got == "key-expiry set" {
+		t.Fatalf("rejected set reported success:\n%s", badOut.String())
+	}
+
+	// The stored value is unchanged.
+	got, err := loadKeyExpiry()
+	if err != nil {
+		t.Fatalf("loadKeyExpiry: %v", err)
+	}
+	if got != "2026-03-03" {
+		t.Fatalf("expiry after a rejected set = %q, want 2026-03-03", got)
+	}
+}
+
+// TestDoctorExpiryReportsMissingOnFresh proves AC2 reports when missing: a fresh
+// config (no expiry) reports "none set" and the run still exits 0 for that part.
+func TestDoctorExpiryReportsMissingOnFresh(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", path)
+
+	// A valid config (all three secrets present) but no expiry stored: the
+	// run passes and reports "none set".
+	cfg := fmt.Sprintf(`{"garmin_api_key":"%s","fitsel_token":"%s","fitsel_passkey":"%s"}`,
+		doctorGarminKey, doctorFitselTok, doctorFitselPass)
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	var report bytes.Buffer
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"synced":{}}`), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+	gar := fakes.NewFakeGarmin(doctorGarminKey, fakes.NewActivities())
+	defer gar.Close()
+	garminBaseURL = gar.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+	})
+	if err := runDoctor(strings.NewReader(""), &report, []string{"-state", statePath}); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if !strings.Contains(report.String(), "key-expiry: none set") {
+		t.Fatalf("expected a 'none set' report on a fresh config, got:\n%s", report.String())
+	}
+}
+
 // TestDoctorConfigNot0600 proves a config file with group/other access is a
 // ✗: the security intent of mode 0600 is no group/other read.
 func TestDoctorConfigNot0600(t *testing.T) {
