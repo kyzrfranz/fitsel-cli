@@ -63,6 +63,7 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/kyzrfranz/fitsel-cli
     description: Sync Garmin activities to fitsel
+    license: MIT
     # The binary is not signed/notarized: drop the quarantine flag so
     # Gatekeeper does not block it on first run.
     hooks:
