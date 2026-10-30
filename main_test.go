@@ -1130,6 +1130,40 @@ func TestInitThenRunEndToEnd(t *testing.T) {
 	}
 }
 
+// TestInitStoresExpiryThenReloads proves AC1 at the CLI level: when init is
+// given a real YYYY-MM-DD expiry as its fourth line, initCommand returns nil
+// AND a later, fresh config.Load() returns that same date. This is the one new
+// branch in the --set-key-expiry story that a prior test run only walked on the
+// blank-skip path (every other init test feeds exactly three lines), so a bug
+// in the success path (forgetting to Save, or storing the trimmed value wrong)
+// would silently store nothing with no failing test to catch it.
+func TestInitStoresExpiryThenReloads(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("FITSEL_CONFIG", configPath)
+	t.Setenv("GARMIN_API_KEY", "")
+	t.Setenv("FITSEL_TOKEN", "")
+	t.Setenv("FITSEL_PASSKEY", "")
+
+	input := "garmin-key\nfitsel-token\nfitsel-passkey\n2026-12-31\n"
+	var out bytes.Buffer
+	if err := initCommand(strings.NewReader(input), &out, nil); err != nil {
+		t.Fatalf("init with a valid expiry: %v", err)
+	}
+	// The date value must never be echoed on stdout (AC4).
+	if strings.Contains(out.String(), "2026-12-31") {
+		t.Fatalf("init leaked the stored date into output:\n%s", out.String())
+	}
+	// AC1 verbatim: a later, fresh process reloads the same value via config.Path().
+	creds, err := config.Load()
+	if err != nil {
+		t.Fatalf("load after init: %v", err)
+	}
+	if creds.PersonalAPIKeyExpiry != "2026-12-31" {
+		t.Fatalf("init stored expiry %q, want 2026-12-31", creds.PersonalAPIKeyExpiry)
+	}
+}
+
 // newWindowedActivities wires a fake Garmin serving n activities across a wide
 // date range (each a day apart, id 1 newest, id n oldest) plus a fake fitsel
 // and the run args, for the --to end-to-end checks. The dates are real
