@@ -58,7 +58,6 @@ const (
 // test hooks: overridden by tests to point at the fake servers.
 var (
 	garminBaseURL = garmin.BaseURL
-	fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 
 	// The clients' retry/back-off delays default to their production values
 	// (2s upload / 30s back-off); tests point them at ~0 so the suite does not
