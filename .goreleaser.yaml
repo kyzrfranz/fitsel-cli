@@ -22,6 +22,29 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Debian (.deb) and RPM (.rpm) packages so the binary reaches Debian/Ubuntu and
+# Fedora/RHEL users. GoReleaser attaches these to the GitHub Release alongside
+# the archives and checksums automatically (no workflow change). The default
+# file name is fitsel-client_<version>_linux_<arch>.{deb,rpm}, which matches the
+# fitsel-client_* install glob. Both formats share this one block.
+nfpms:
+  - package_name: fitsel-client
+    ids: [build-fitsel-client]
+    # Required metadata.
+    homepage: https://github.com/kyzrfranz/fitsel-cli
+    maintainer: "fitsel-client <https://github.com/kyzrfranz/fitsel-cli>"
+    description: Sync Garmin activities to fitsel
+    license: MIT
+    # Install the binary to /usr/local/bin so apt/dnf put it on PATH and the
+    # `fitsel-client --version` install check passes.
+    contents:
+      - src: ./dist/{{ .Binary }}/{{ .Binary }}
+        dst: /usr/local/bin/{{ .Binary }}
+        file_type: file
+    formats:
+      - deb
+      - rpm
+
 # Pinned so the release (and the cask's download URLs) always target the
 # GitHub mirror, not whichever remote "origin" happens to be.
 release:
