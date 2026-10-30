@@ -68,6 +68,71 @@ jobs:
           go build ./...
           go vet ./...
           go test ./...
+      - name: Race detector (go test -race)
+        # The race detector needs CGO, which needs a C compiler. The desk
+        # runner ships without one, so this step guards on the compiler and
+        # prints a notice and skips rather than failing: a missing compiler is
+        # an environment gap for the founder to close, not a code defect.
+        run: |
+          set -euo pipefail
+          if command -v cc >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
+            echo "C compiler found; running go test -race ./..."
+            export GOPROXY=off
+            go test -race ./...
+          else
+            echo "no C compiler on desk runner; skipping go test -race" >&2
+            echo "install a C compiler (gcc/clang) so the race detector runs" >&2
+            exit 0
+          fi
+      - name: staticcheck
+        # Runs only if already installed on the desk runner; a missing tool is
+        # reported, not failed, so the founder knows to install it. CGO is off:
+        # without a C compiler staticcheck fails to build runtime/cgo, so the
+        # same guard the race step uses keeps staticcheck from failing on it.
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          if command -v staticcheck >/dev/null 2>&1; then
+            echo "staticcheck found; running against all packages"
+            export GOPROXY=off
+            staticcheck ./...
+          else
+            echo "staticcheck not found on desk runner; skipping" >&2
+            exit 0
+          fi
+      - name: golangci-lint
+        # Runs only if already installed on the desk runner; a missing tool is
+        # reported, not failed, so the founder knows to install it.
+        run: |
+          set -euo pipefail
+          if command -v golangci-lint >/dev/null 2>&1; then
+            echo "golangci-lint found; running linters"
+            export GOPROXY=off
+            golangci-lint run ./...
+          else
+            echo "golangci-lint not found on desk runner; skipping" >&2
+            exit 0
+          fi
+      - name: Lint tool availability
+        # Reports which linters are missing so the founder can install them.
+        # This is informational only: the steps above already skip cleanly.
+        run: |
+          set -uo pipefail
+          echo "=== lint tool availability on desk runner ==="
+          for tool in staticcheck golangci-lint; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool: installed ($( "$tool" --version 2>&1 | head -1 ))"
+            else
+              echo "$tool: MISSING — install it so CI can lint"
+            fi
+          done
+          echo "=== C compiler (needed for go test -race) ==="
+          if command -v cc >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
+            echo "C compiler: installed"
+          else
+            echo "C compiler: MISSING — install gcc/clang so go test -race runs"
+          fi
       - name: Cross-compile smoke check
         env:
           CGO_ENABLED: "0"

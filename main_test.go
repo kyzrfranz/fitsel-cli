@@ -66,7 +66,6 @@ func TestFirstRunUploadsEverythingSecondRunUploadsNothing(t *testing.T) {
 	}
 	// Point the clients at the fakes.
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -100,7 +99,6 @@ func TestDryRunUploadsNothing(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -148,7 +146,6 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -206,7 +203,6 @@ func TestBadKeyExitsGarmin(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "wrong-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -314,7 +310,6 @@ func TestRefreshMidRunUploadsEverything(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -355,7 +350,6 @@ func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -395,7 +389,6 @@ func TestRateLimitShortRetryThenSucceeds(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -422,10 +415,8 @@ func newManyActivities(t *testing.T, n int) (*fakes.FakeGarmin, *fakes.FakeFitse
 	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.ManyActivities(n, "2026-10-01"))
 	fits := fakes.NewFakeFitsel("test-passkey")
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -517,10 +508,8 @@ func TestSyncPagesResumeAfterInterruptedUpload(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -569,7 +558,6 @@ func newFitselArgs(t *testing.T, dir string, fits *fakes.FakeFitsel) []string {
 	t.Cleanup(gar.Close)
 	t.Cleanup(fits.Close)
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -706,7 +694,6 @@ func TestSkipListedInRunSummary(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -771,7 +758,6 @@ func TestSkipCountPersistsAcrossRuns(t *testing.T) {
 	fits1.FailNextQueued(http.StatusBadRequest)
 	defer fits1.Close()
 	garminBaseURL = gar1.URL()
-	fitselBaseURL = fits1.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -799,7 +785,6 @@ func TestSkipCountPersistsAcrossRuns(t *testing.T) {
 	fits2.FailNextQueued(http.StatusBadRequest, http.StatusBadRequest)
 	defer fits2.Close()
 	garminBaseURL = gar2.URL()
-	fitselBaseURL = fits2.URL()
 	args2 := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits2.URL() + "/ingest/wh/test-token"}
 	// 1001 fails again (its second), 1002 fails once. Neither skips yet.
 	if err := run(args2); err == nil {
@@ -839,7 +824,6 @@ func TestUnskipFlagRetries(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -894,7 +878,6 @@ func TestSkipThresholdFlagOverride(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -926,7 +909,6 @@ func TestSkipThresholdZeroDisablesSkip(t *testing.T) {
 		garminBaseURL = gar.URL()
 		fits := fakes.NewFakeFitsel("test-passkey")
 		fits.FailNextQueued(http.StatusBadRequest)
-		fitselBaseURL = fits.URL()
 		t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 		t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 		t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -1123,10 +1105,8 @@ func TestInitThenRunEndToEnd(t *testing.T) {
 
 	// Point the clients at the fakes.
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	// init stores the three secrets that the later run will read from the file.
@@ -1173,10 +1153,8 @@ func newWindowedActivities(t *testing.T, n int) (*fakes.FakeGarmin, *fakes.FakeF
 	gar := fakes.NewFakeGarmin("test-garmin-key", acts)
 	fits := fakes.NewFakeFitsel("test-passkey")
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -1311,10 +1289,8 @@ func newRunArgs(t *testing.T, dir string, gar *fakes.FakeGarmin, fits *fakes.Fak
 	t.Helper()
 	statePath := filepath.Join(dir, "state.json")
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -1433,10 +1409,8 @@ func TestInvalidFitCountsTowardSkip(t *testing.T) {
 	// Point the clients at the fakes (newRunArgs does this; set it here for the
 	// custom args below).
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -1575,10 +1549,8 @@ func TestDoctorAllChecksPass(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1623,10 +1595,8 @@ func TestDoctorBadKeyExitsNonZero(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1668,10 +1638,8 @@ func TestDoctorMissingKeyReportsWhich(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1732,10 +1700,8 @@ func TestDoctorConfigNot0600(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1764,10 +1730,8 @@ func TestDoctorMissingState(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1800,10 +1764,8 @@ func TestDoctorNoSecretLeaked(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1835,10 +1797,8 @@ func TestDoctorNeverTouchesFitsel(t *testing.T) {
 	fits := fakes.NewFakeFitsel(doctorFitselPass)
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	var out bytes.Buffer
@@ -1873,10 +1833,8 @@ func TestDoctorThenEndToEnd(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	// init stores the three secrets the later doctor reads from the file.
@@ -2090,10 +2048,8 @@ func TestStatusPendingListsWhatWouldUpload(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -2161,10 +2117,8 @@ func TestStatusPendingUpToDate(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -2198,10 +2152,8 @@ func TestDefaultStatePathIsUsedWithoutStateFlag(t *testing.T) {
 	defer fits.Close()
 
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -2251,10 +2203,8 @@ func TestMidCancelStopsRunWithoutMarkingInFlightSynced(t *testing.T) {
 	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
 	defer gar.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Cleanup(func() {
 		garminBaseURL = garmin.BaseURL
-		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
 	})
 
 	// The run's own context, which we cancel to simulate a Ctrl-C.
@@ -2458,7 +2408,6 @@ func TestUpdateCheckNewerVersionPrintsHint(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -2518,7 +2467,6 @@ func TestUpdateCheckOptedOutMakesNoRequest(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
@@ -2567,7 +2515,6 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 1: %v", err)
@@ -2587,7 +2534,6 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", more)
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 2: %v", err)
@@ -2614,7 +2560,6 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 2b: %v", err)
@@ -2637,7 +2582,6 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", more)
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 3: %v", err)
@@ -2665,7 +2609,6 @@ func TestNoStateWithoutSinceStillFails(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -2701,7 +2644,6 @@ func TestMigratedStateStillRequiresSince(t *testing.T) {
 	fits := fakes.NewFakeFitsel("test-passkey")
 	defer fits.Close()
 	garminBaseURL = gar.URL()
-	fitselBaseURL = fits.URL()
 	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
 	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
 	t.Setenv("FITSEL_PASSKEY", "test-passkey")
@@ -2749,7 +2691,6 @@ func TestExplicitSinceWinsOverStored(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 1: %v", err)
@@ -2765,7 +2706,6 @@ func TestExplicitSinceWinsOverStored(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-since", "2026-09-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 2: %v", err)
@@ -2786,7 +2726,6 @@ func TestExplicitSinceWinsOverStored(t *testing.T) {
 		gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
 		fits := fakes.NewFakeFitsel("test-passkey")
 		garminBaseURL = gar.URL()
-		fitselBaseURL = fits.URL()
 		args := []string{"-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
 		if err := run(args); err != nil {
 			t.Fatalf("run 3: %v", err)
