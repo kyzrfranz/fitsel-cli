@@ -7,12 +7,19 @@
 // many times as SkipThreshold is marked skipped and left alone until unskipped.
 // Both the synced set and the failure counts are persisted together, so the
 // skip decision survives across runs.
+//
+// Each synced activity also carries the metadata status reports offline — its
+// name and Garmin's start time (see SyncMeta) — and each successful run records
+// a run-level last-synced time, so `status` can report "last synced" and the
+// newest synced activity without touching the network.
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // stateDir is the directory the default state file lives in, mirroring the
@@ -42,10 +49,19 @@ func Path() string {
 	return filepath.Join(stateDir(), "state.json")
 }
 
+// SyncMeta is the per-activity metadata status reports offline: the activity's
+// name and Garmin's start time (startTimeGMT, verbatim — status displays it,
+// no reformatting). It is persisted alongside the synced key so status can pick
+// the newest synced activity by date and show its name without the network.
+type SyncMeta struct {
+	Name  string `json:"name"`
+	Start string `json:"start"`
+}
+
 // State holds which activity IDs have been synced and how many times each has
 // failed, so a re-run is idempotent and stops chasing one that keeps failing.
 type State struct {
-	synced map[string]bool
+	synced map[string]SyncMeta
 	fails  map[string]int
 	skips  map[string]bool
 	path   string
@@ -55,6 +71,12 @@ type State struct {
 	// something the state file records. The persisted thing is the per-activity
 	// fail count, from which the threshold decides.
 	SkipThreshold int
+
+	// lastSyncedAt is the run-level timestamp of the most recent successful
+	// run, stamped on the first MarkDone of the run. It is not persisted in
+	// the struct (it is a derived value), but it is persisted to the file as
+	// lastSyncedAt so status can report it offline on the next run.
+	lastSyncedAt time.Time
 }
 
 // skipThreshold is the default number of failures after which an activity is
@@ -68,11 +90,18 @@ const skipThreshold = 3
 // ~/.config/fitsel-client/state.json. That is what makes repeated runs idempotent
 // by default (per #127): before this, Load("") returned a state whose Save() was
 // a no-op, so the state file was never written and every run re-uploaded.
+//
+// The synced entries carry their metadata (name + start) in the new shape. An
+// old file written before the metadata change holds bare booleans
+// ({"1001": true}); Load accepts both shapes, treating a bare boolean as an
+// entry with no name or start (still counted toward the total, just with no
+// name/date to display). This is done in one place so the core idempotency
+// logic never sees the raw shape.
 func Load(path string) (*State, error) {
 	if path == "" {
 		path = Path()
 	}
-	s := &State{synced: map[string]bool{}, fails: map[string]int{}, skips: map[string]bool{}, path: path, SkipThreshold: skipThreshold}
+	s := &State{synced: map[string]SyncMeta{}, fails: map[string]int{}, skips: map[string]bool{}, path: path, SkipThreshold: skipThreshold}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -83,37 +112,71 @@ func Load(path string) (*State, error) {
 	if len(b) == 0 {
 		return s, nil
 	}
-	// The state file is a single object holding the synced set, the per-activity
-	// failure counts, and the skip set, so all three persist and reload
-	// together. The skip set is the actual decision (which activities to leave
-	// alone); the count is what drives it. Persisting both means a changed
+	// The state file is a single object holding the synced set (with metadata),
+	// the per-activity failure counts, and the skip set, so all persist and
+	// reload together. The skip set is the actual decision (which activities to
+	// leave alone); the count is what drives it. Persisting both means a changed
 	// --skip-threshold between runs still restores the right skips.
 	var data struct {
-		Synced map[string]bool `json:"synced"`
-		Fails  map[string]int  `json:"fails"`
-		Skips  map[string]bool `json:"skips"`
+		Synced       map[string]json.RawMessage `json:"synced"`
+		Fails        map[string]int             `json:"fails"`
+		Skips        map[string]bool            `json:"skips"`
+		LastSyncedAt string                     `json:"lastSyncedAt"`
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		return nil, err
 	}
-	s.synced = data.Synced
+	// Each synced entry is either the new object shape ({"name":..,"start":..})
+	// or the old bare boolean (true). A bare boolean cannot unmarshal into
+	// SyncMeta, so treat it as the zero value (no name, no start) — still
+	// counted toward the total. Anything else is a malformed file and errors.
+	s.synced = make(map[string]SyncMeta, len(data.Synced))
+	for id, raw := range data.Synced {
+		trimmed := bytes.TrimSpace(raw)
+		if bytes.Equal(trimmed, []byte("true")) || bytes.Equal(trimmed, []byte("false")) {
+			s.synced[id] = SyncMeta{} // old shape: no metadata to display
+			continue
+		}
+		var meta SyncMeta
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return nil, err
+		}
+		s.synced[id] = meta
+	}
 	s.fails = data.Fails
 	s.skips = data.Skips
+	if data.LastSyncedAt != "" {
+		if t, err := time.Parse(time.RFC3339, data.LastSyncedAt); err == nil {
+			s.lastSyncedAt = t
+		}
+	}
 	return s, nil
 }
 
 // Done reports whether the activity has already been synced.
-func (s *State) Done(id string) bool { return s.synced[id] }
+func (s *State) Done(id string) bool { _, ok := s.synced[id]; return ok }
 
-// MarkDone records that the activity is synced.
-func (s *State) MarkDone(id string) { s.synced[id] = true }
+// MarkDone records that the activity is synced, storing its name and Garmin's
+// start time so status can report the newest synced activity by date. The first
+// MarkDone of a run also stamps the run-level last-synced time.
+func (s *State) MarkDone(id string, name, start string) {
+	if _, ok := s.synced[id]; !ok {
+		// The first activity synced in this run stamps the run-level time, so
+		// "last synced" reflects the most recent successful run, not the first
+		// ever.
+		if s.lastSyncedAt.IsZero() {
+			s.lastSyncedAt = time.Now().UTC()
+		}
+	}
+	s.synced[id] = SyncMeta{Name: name, Start: start}
+}
 
 // Fail records that the activity failed to sync this run, returning whether it
 // has now reached SkipThreshold and must be skipped. A synced activity is not
 // counted: once synced it is out of the pending set, so its count never matters.
 // A SkipThreshold of 0 disables the skip: the activity is never skipped.
 func (s *State) Fail(id string) bool {
-	if s.synced[id] {
+	if _, ok := s.synced[id]; ok {
 		return false
 	}
 	if s.SkipThreshold <= 0 {
@@ -153,9 +216,35 @@ func (s *State) Skips() []string {
 // count that drove the skip.
 func (s *State) FailCount(id string) int { return s.fails[id] }
 
+// SyncedCount returns how many activities have been synced so far. status
+// reports it as "activities synced so far".
+func (s *State) SyncedCount() int { return len(s.synced) }
+
+// LastSyncedAt returns the run-level timestamp of the most recent successful
+// run, or the zero time if nothing has ever synced. status reports the zero
+// time as "never synced yet".
+func (s *State) LastSyncedAt() time.Time { return s.lastSyncedAt }
+
+// NewestSynced returns the synced activity with the latest start time, and its
+// id, so status can report "newest synced activity by name and date". Entries
+// with no recorded start sort last. It returns an empty id when nothing is
+// synced or no entry has a recorded start (the old bool shape).
+func (s *State) NewestSynced() (id string, meta SyncMeta) {
+	for k, m := range s.synced {
+		if m.Start == "" {
+			continue
+		}
+		if id == "" || m.Start > meta.Start {
+			id, meta = k, m
+		}
+	}
+	return id, meta
+}
+
 // Save persists the state atomically (temp file + rename) so a crash mid-write
-// cannot corrupt it. It writes both the synced set and the failure counts so
-// neither is lost across runs.
+// cannot corrupt it. It writes the synced set (with metadata), the failure
+// counts, the skip set, and the run-level last-synced time, so none is lost
+// across runs.
 func (s *State) Save() error {
 	if s.path == "" {
 		return nil
@@ -168,10 +257,18 @@ func (s *State) Save() error {
 		return err
 	}
 	data := struct {
-		Synced map[string]bool `json:"synced"`
-		Fails  map[string]int  `json:"fails"`
-		Skips  map[string]bool `json:"skips"`
-	}{Synced: s.synced, Fails: s.fails, Skips: s.skips}
+		Synced       map[string]SyncMeta `json:"synced"`
+		Fails        map[string]int      `json:"fails"`
+		Skips        map[string]bool     `json:"skips"`
+		LastSyncedAt string              `json:"lastSyncedAt"`
+	}{
+		Synced: s.synced,
+		Fails:  s.fails,
+		Skips:  s.skips,
+	}
+	if !s.lastSyncedAt.IsZero() {
+		data.LastSyncedAt = s.lastSyncedAt.Format(time.RFC3339)
+	}
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
