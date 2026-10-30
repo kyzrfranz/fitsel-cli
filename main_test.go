@@ -2397,4 +2397,3 @@ func TestUpdateCheckOptedOutMakesNoRequest(t *testing.T) {
 		t.Fatalf("opted-out run made %d requests; want 0", got)
 	}
 }
-

@@ -50,8 +50,7 @@ type githubRelease struct {
 type Hint struct {
 	URL     string // the release page, e.g. https://github.com/kyzrfranz/fitsel-cli/releases/tag/v0.1.0
 	BrewCmd string // "brew upgrade fitsel-client"
-	// Text is the single line the human-facing CLI prints, built once in newHint.
-	Text string
+	Text    string // the single line the human-facing CLI prints, built once in newHint
 }
 
 // hintFormat is the one-line hint printed in human mode: the release URL, then
@@ -101,7 +100,7 @@ var Base = BaseURL
 // (main) can pass a zero Options and still get the production behaviour.
 type Options struct {
 	// Base overrides the GitHub API base URL. The GET goes to <Base>
-	// + "/releases/latest". Leave it empty to use the default (https://api.github.com).
+	// + "/releases/latest". Leave it empty to use the default.
 	Base string
 
 	// StateDir is where the once-per-day timestamp is read from and written to.
@@ -156,7 +155,9 @@ func Run(opts Options) (*Hint, error) {
 		// Every failure from check is swallowed: a dial error, the >2s timeout,
 		// a non-2xx response, or a body that is not the expected JSON. The check
 		// is best-effort, so none of them is reported. The timestamp is still
-		// recorded, so the failed attempt counts against the daily budget.
+		// recorded, so a failed attempt counts against the daily budget and the
+		// next run within 24h is throttled rather than retrying every call.
+		_ = recordRun(opts)
 		return nil, errors.Join(ErrDisabled, err)
 	}
 
@@ -288,8 +289,7 @@ func check(opts Options) (*Hint, error) {
 		return nil, io.ErrUnexpectedEOF // malformed or truncated body.
 	}
 
-	hint := compare(rel)
-	return hint, nil
+	return compare(rel), nil
 }
 
 // newHint builds the one-line hint from the release URL and the brew command.

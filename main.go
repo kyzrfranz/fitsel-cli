@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kyzrfranz/fitsel-cli/internal/config"
 	"github.com/kyzrfranz/fitsel-cli/internal/checker"
+	"github.com/kyzrfranz/fitsel-cli/internal/config"
 	"github.com/kyzrfranz/fitsel-cli/internal/fitsel"
 	"github.com/kyzrfranz/fitsel-cli/internal/garmin"
 	"github.com/kyzrfranz/fitsel-cli/internal/state"
@@ -66,7 +66,10 @@ var (
 )
 
 // version is set at release time by GoReleaser via -ldflags "-X main.version=...".
-var version = "dev"
+// The default carries a "-dev" suffix so a local build (go run .) is recognised
+// as a dev build and skips the update check (see internal/checker); a release
+// overrides it with a plain semver like "1.2.0".
+var version = "0.0.0-dev"
 
 // githubBaseURL overrides the GitHub API base the update checker queries. It is
 // empty in production (the checker uses the real GitHub); tests point it at an
