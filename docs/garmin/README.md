@@ -5,7 +5,7 @@ The source for the fake Garmin server. Fetched on 2026-10-28 from Garmin's publi
 - `personal-api.openapi.json`: the OpenAPI 3.0.1 description "Garmin Connect Personal API" 1.0.0, 26 paths, as embedded in the Swagger page at https://developer.garmin.com/gc-developer-program/personal/personal-api (the page's JavaScript bundle holds it as `JSON.parse('…')`).
 - `personal-api.md`, `personal-faq.md`: the text of the two pages.
 
-## What garmin-sync uses
+## What fitsel-client uses
 - Token: `POST https://personal.connectapi.garmin.com/personalapitoken-service/personal-api/personal-api-key/token` with the header `Authorization: ApiKey <key>`. It is not in the OpenAPI file; it is on both pages. Tokens last 24 hours or until the key expires; there are no refresh tokens.
 - List: `GET /activitylist-service/activities/search/activities` with `start`, `limit`, `startDate`, `endDate`, `sortBy`, `sortOrder` and more. It returns an array of `SummarizedActivityDTO`, and an empty array when nothing matches. Documented responses: `200`, `400`, `401`, `403`, `500`.
 - Download: `GET /download-service/files/activity/{activityId}`, "an activity file in its original format". The response is `application/x-zip-compressed`: **a ZIP archive, not a bare FIT file**. Unzip it before uploading to fitsel.

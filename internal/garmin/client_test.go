@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"garmin-sync/internal/fakes"
+	"github.com/kyzrfranz/fitsel-cli/internal/fakes"
 )
 
 func TestAuthorizeAndList(t *testing.T) {
