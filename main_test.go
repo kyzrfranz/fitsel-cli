@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"garmin-sync/internal/config"
-	"garmin-sync/internal/fakes"
-	"garmin-sync/internal/fitsel"
-	"garmin-sync/internal/garmin"
-	"garmin-sync/internal/state"
+	"github.com/kyzrfranz/fitsel-cli/internal/config"
+	"github.com/kyzrfranz/fitsel-cli/internal/fakes"
+	"github.com/kyzrfranz/fitsel-cli/internal/fitsel"
+	"github.com/kyzrfranz/fitsel-cli/internal/garmin"
+	"github.com/kyzrfranz/fitsel-cli/internal/state"
 )
 
 func newActivities() []fakes.FakeActivity {
@@ -969,7 +969,7 @@ func TestUploadExhaustedExitsFitselAndUploadsNothing(t *testing.T) {
 	}
 }
 
-// TestInitWritesNoSyncRun proves `garmin-sync init` is a distinct setup
+// TestInitWritesNoSyncRun proves `fitsel-client init` is a distinct setup
 // subcommand: it writes the three secrets to the config and does not start a
 // sync run. It feeds the three secrets on stdin, then checks the file holds all
 // three via config.Load(). No environment is set, so the values come from the

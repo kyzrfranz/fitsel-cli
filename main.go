@@ -21,10 +21,10 @@ import (
 	"syscall"
 	"time"
 
-	"garmin-sync/internal/config"
-	"garmin-sync/internal/fitsel"
-	"garmin-sync/internal/garmin"
-	"garmin-sync/internal/state"
+	"github.com/kyzrfranz/fitsel-cli/internal/config"
+	"github.com/kyzrfranz/fitsel-cli/internal/fitsel"
+	"github.com/kyzrfranz/fitsel-cli/internal/garmin"
+	"github.com/kyzrfranz/fitsel-cli/internal/state"
 )
 
 // exit codes
