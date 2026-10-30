@@ -72,7 +72,7 @@ sha256sum -c checksums.txt
 On Windows (PowerShell):
 
 ```powershell
-Get-FileHash .\fitsel-client_<version>_windows_<arch>.tar.gz -Algorithm SHA256
+Get-FileHash .\fitsel-client_<version>_windows_<arch>.zip -Algorithm SHA256
 ```
 
 Compare the hash against the line for your file in `checksums.txt`. Then unpack
