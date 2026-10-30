@@ -71,3 +71,37 @@ homebrew_casks:
           on_macos do
             run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/fitsel-client"]
           end
+
+# Scoop manifest for the public Scoop bucket, so `scoop install kyzrfranz/tap/fitsel-client`
+# resolves this release. Writes into the folder bucket of the existing kyzrfranz/homebrew-tap
+# repo (same repository.owner/name as the cask above) with the same token, so no new repo or
+# secret. Rides the existing windows builds via ids [build-fitsel-client]; the manifest's
+# URL is filled from the archives it consumes.
+scoops:
+  - name: fitsel-client
+    description: Sync Garmin activities to fitsel
+    homepage: https://github.com/kyzrfranz/fitsel-cli
+    license: MIT
+    repository:
+      owner: kyzrfranz
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # No archive_template: GoReleaser's archives block (no name_template of its own)
+    # names the zip {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.zip, and
+    # Scoop auto-matches that by goos/goarch, so the manifest points at the real asset.
+    ids:
+      - build-fitsel-client
+
+# Winget manifest, generated to dist/ only (skip_upload: true). Nothing is sent to Microsoft;
+# the founder submits it by hand if wanted. Rides the existing windows builds via ids
+# [build-fitsel-client].
+wingets:
+  - packageIdentifier: kyzrfe.fitselcli
+    publisher: kyzrfe
+    shortDescription: Sync Garmin activities to fitsel
+    homepage: https://github.com/kyzrfranz/fitsel-cli
+    license: MIT
+    url_template: "https://github.com/kyzrfranz/fitsel-cli/releases/download/{{ .Tag }}/{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.zip"
+    skip_upload: true
+    ids:
+      - build-fitsel-client
