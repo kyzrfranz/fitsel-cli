@@ -118,10 +118,10 @@ func Load(path string) (*State, error) {
 	// leave alone); the count is what drives it. Persisting both means a changed
 	// --skip-threshold between runs still restores the right skips.
 	var data struct {
-		Synced  map[string]json.RawMessage `json:"synced"`
-		Fails   map[string]int             `json:"fails"`
-		Skips   map[string]bool            `json:"skips"`
-		LastSyncedAt string                   `json:"lastSyncedAt"`
+		Synced       map[string]json.RawMessage `json:"synced"`
+		Fails        map[string]int             `json:"fails"`
+		Skips        map[string]bool            `json:"skips"`
+		LastSyncedAt string                     `json:"lastSyncedAt"`
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		return nil, err
