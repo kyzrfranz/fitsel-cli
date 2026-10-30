@@ -36,16 +36,26 @@ const BaseURL = "https://personal.connectapi.garmin.com"
 // new one. Callers branch on it with errors.Is.
 var ErrBadKey = errors.New("garmin: invalid API key")
 
-// ErrRateLimited is returned when Garmin rate-limits a protected call (429): the
-// client backs off for Retry-After (a safe default if the header is absent) and
-// returns this once, so the run stops cleanly instead of hammering the API.
-// Callers branch on it with errors.Is.
+// ErrRateLimited is returned when Garmin rate-limits a protected call (429):
+// the client honours Retry-After up to retryAfterCap, then retries the request
+// once; a window past the cap (or one the run's context will not let it wait)
+// stops the run cleanly instead of hammering the API. Callers branch on it with
+// errors.Is.
 var ErrRateLimited = errors.New("garmin: rate limited")
 
 // defaultRetryAfter is the back-off the client honours when Garmin returns a
 // 429 without a Retry-After header: the Personal API does not document it, so
 // this is a safe default rather than an immediate retry (see the README).
 const defaultRetryAfter = 30 * time.Second
+
+// RetryAfterCap is the longest the client waits on a 429 before giving up.
+// Garmin's Retry-After can be an absolute HTTP date far in the future (or a
+// plain number of seconds), so a naive wait could stall the run for hours.
+// The client caps the wait here: shorter windows are honoured and the request
+// retried; a window past the cap means the run stops immediately with the
+// retry time in the error line (see the README). It is a var, not a const, so
+// tests can shorten it.
+var RetryAfterCap = 60 * time.Second
 
 // RetryAfterDelay is the production back-off when Garmin rate-limits a call
 // without a Retry-After header. It is a var, not a const, so tests can point it
@@ -78,6 +88,29 @@ func retryAfter(c *Client, h string) time.Duration {
 		}
 	}
 	return defaultRetryAfter
+}
+
+// sleepCancellable waits for d, returning early if the run's context is
+// cancelled first (a Ctrl-C / SIGTERM). It returns the context's error on
+// cancellation and nil once the full wait has elapsed, so the caller can tell a
+// stop-apart from a completed wait apart. A d of zero returns at once.
+func sleepCancellable(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Client talks to Garmin's Personal API. It owns its access token: once
@@ -274,21 +307,46 @@ func (c *Client) get(ctx context.Context, op, url string) (io.ReadCloser, error)
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		// Garmin is asking us to slow down: back off for Retry-After (a safe
-		// default if the header is absent) and stop cleanly. No retry loop —
-		// the run returns ErrRateLimited so main gives it its own exit code.
-		resp.Body.Close()
-		// Honour the run's context while waiting: a Ctrl-C bails out of the
-		// back-off instead of sitting through the whole window, and the run
-		// treats it as an interrupt rather than a rate limit.
-		timer := time.NewTimer(retryAfter(c, resp.Header.Get("Retry-After")))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
+		// Garmin is asking us to slow down. Act on Retry-After: the window is
+		// capped (retryAfterCap) so a far-future HTTP-date cannot stall the run
+		// — within the cap we wait (cancelling on the run's context) and retry
+		// the request once; past the cap we stop immediately, returning
+		// ErrRateLimited with the retry time so the run reports when Garmin asked
+		// it to come back (see the README).
+		wait := retryAfter(c, resp.Header.Get("Retry-After"))
+		if wait > RetryAfterCap {
+			resp.Body.Close()
+			return nil, fmt.Errorf("garmin: rate limited, Garmin asked to retry after %s (over the %s cap): %w",
+				wait.Round(time.Second), RetryAfterCap.Round(time.Second), ErrRateLimited)
 		}
-		return nil, ErrRateLimited
+		resp.Body.Close()
+		if err := sleepCancellable(ctx, wait); err != nil {
+			return nil, err // a Ctrl-C / SIGTERM during the wait: an interrupt, not a rate limit.
+		}
+		// Retry the request once. A second 429 is not retried: the run stops
+		// with ErrRateLimited rather than hammering a rate-limited API.
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		tok, err := c.bearer(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok.token)
+		resp, err = c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			return nil, ErrRateLimited
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("garmin: request returned %s", resp.Status)
+		}
+		return resp.Body, nil
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		// The token was rejected: force a refresh (do not go through bearer(),

@@ -334,11 +334,18 @@ func TestRefreshMidRunUploadsEverything(t *testing.T) {
 	}
 }
 
-// TestRateLimitExitsGarminAndUploadsNothing is step 3's end-to-end check (per
-// #84): a run whose first protected call is rate-limited (429) backs off for
-// Retry-After and stops cleanly with its own exit code, uploading nothing.
+// TestRateLimitExitsGarminAndUploadsNothing is the end-to-end check (per #133):
+// a run whose first protected call is rate-limited (429) with a Retry-After
+// past the cap stops immediately with its own exit code, uploading nothing —
+// it reports when Garmin asked it to come back rather than waiting out a window
+// it cannot honour.
 func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	useFastDelays(t)
+	// The fake's RateLimitOnce sets Retry-After: 2 (2s). Cap the wait below it
+	// so this exercises the over-cap path: stop immediately, exit 5.
+	origCap := garmin.RetryAfterCap
+	garmin.RetryAfterCap = 500 * time.Millisecond
+	t.Cleanup(func() { garmin.RetryAfterCap = origCap })
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
@@ -368,6 +375,39 @@ func TestRateLimitExitsGarminAndUploadsNothing(t *testing.T) {
 	}
 	if len(fits.Uploadees) != 0 {
 		t.Fatalf("rate limit uploaded %d files; expected none", len(fits.Uploadees))
+	}
+}
+
+// TestRateLimitShortRetryThenSucceeds proves the happy half of the retry: a
+// 429 with a short Retry-After within the cap makes the run wait and retry the
+// list, so the run completes and uploads instead of stopping. This is #133's
+// reward for acting on a window we can honour.
+func TestRateLimitShortRetryThenSucceeds(t *testing.T) {
+	useFastDelays(t)
+	// The fake's RateLimitOnce sets Retry-After: 2 (2s, within the 60s cap),
+	// so the run waits 2s then retries and proceeds.
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	gar.RateLimitOnce = true
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	if err := run(args); err != nil {
+		t.Fatalf("run after a retried 429: %v", err)
+	}
+	// The run retried the 429 and synced all three activities.
+	if len(fits.Uploadees) != 3 {
+		t.Fatalf("uploaded %d files; expected 3 after the retry", len(fits.Uploadees))
 	}
 }
 
