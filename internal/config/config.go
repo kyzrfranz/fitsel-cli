@@ -37,6 +37,7 @@ func Load() (Credentials, error) {
 	// The config file is read first; any field it leaves empty is filled from
 	// the environment, so an environment variable wins per key and the file
 	// fills the gaps.
+	migrateConfig()
 	c, err := loadFromFile()
 	if err != nil {
 		return Credentials{}, err
@@ -60,6 +61,11 @@ func Load() (Credentials, error) {
 	return c, nil
 }
 
+// oldConfigDir is the pre-rename home-dir default, kept only so a config left
+// there can be found and moved once. It is the single source of the old path,
+// so the migration and any check for it agree on it.
+const oldConfigDir = ".config/garmin-sync"
+
 // configPath returns the location of the config file, created on first use.
 func configPath() string {
 	if p := os.Getenv("FITSEL_CONFIG"); p != "" {
@@ -67,9 +73,60 @@ func configPath() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".config", "garmin-sync", "config.json")
+		return filepath.Join("fitsel-client", "config.json")
 	}
-	return filepath.Join(home, ".config", "garmin-sync", "config.json")
+	return filepath.Join(home, ".config", "fitsel-client", "config.json")
+}
+
+// migrateConfig moves a config left in the old home-dir default to the new
+// location, so the tool reads the credentials it was already given after the
+// directory was renamed. It runs once, the first time Load is called with no
+// $FITSEL_CONFIG set, on a machine that still has the old file and not yet the
+// new one. It reads the old file, writes it to the new path at 0600, and
+// removes the old file. It does nothing (and prints nothing) if either file is
+// absent, the paths are overridden by $FITSEL_CONFIG, or the move has already
+// happened: the new file's presence is what stops a repeat.
+//
+// The old file is trusted as-is — it holds the athlete's own credentials they
+// already wrote here — so its contents are copied unchanged, not validated.
+func migrateConfig() {
+	// The migration is a home-dir-default concern only: a caller who sets
+	// $FITSEL_CONFIG has taken explicit control of the path and must not have
+	// it silently moved.
+	if os.Getenv("FITSEL_CONFIG") != "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	oldPath := filepath.Join(home, oldConfigDir, "config.json")
+	newPath := configPath()
+
+	// A move is a one-time event: if the new file is already there, the
+	// credentials are where the tool reads them and there is nothing to do.
+	if _, err := os.Stat(newPath); err == nil {
+		return
+	}
+	// Only the old file is a migration trigger: if it is gone, there is
+	// nothing to move, so the new file is simply created empty on need.
+	if _, err := os.Stat(oldPath); err != nil {
+		return
+	}
+
+	// Copy the old file to the new path first (at the hygiene the new default
+	// uses), then remove the old one, so a crash between the two never loses
+	// the credentials: the new copy survives and the old still reads.
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o700); err != nil {
+		return
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		// The copy failed or the old file vanished mid-read: leave the old
+		// file in place so it can be tried again next run, rather than
+		// destroying credentials over a transient failure.
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Moved config from %s to %s\n", oldPath, newPath)
 }
 
 // Path returns the location of the config file, so a caller can tell the

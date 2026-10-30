@@ -189,3 +189,61 @@ func TestNoSecretInPartialConfigError(t *testing.T) {
 		}
 	}
 }
+
+// TestMigratesOldConfigDir checks that a config left in the pre-rename
+// ~/.config/garmin-sync directory is read and moved to the new
+// ~/.config/fitsel-client directory on first Load, once. The old file's
+// contents survive unchanged, the old file is removed, and a second Load reads
+// from the new path without migrating again. HOME is a temp dir so the default
+// paths land in a throwaway location.
+func TestMigratesOldConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("FITSEL_CONFIG", "") // use the home-dir default, not $FITSEL_CONFIG
+
+	oldConfig := filepath.Join(dir, ".config", "garmin-sync", "config.json")
+	if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sample = `{"garmin_api_key":"old-key","fitsel_token":"old-token","fitsel_passkey":"old-passkey"}`
+	if err := os.WriteFile(oldConfig, []byte(sample), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newConfig := filepath.Join(dir, ".config", "fitsel-client", "config.json")
+
+	// First Load: reads the old file's values, moves it to the new path.
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GarminKey != "old-key" || c.FitselToken != "old-token" || c.FitselPasskey != "old-passkey" {
+		t.Fatalf("Load did not read the migrated config: %+v", c)
+	}
+	// The old file is gone.
+	if _, err := os.Stat(oldConfig); !os.IsNotExist(err) {
+		t.Fatalf("old config was not removed, stat err = %v", err)
+	}
+	// The new file exists with the same contents.
+	got, err := os.ReadFile(newConfig)
+	if err != nil {
+		t.Fatalf("new config not written: %v", err)
+	}
+	if string(got) != sample {
+		t.Fatalf("new config contents = %q, want %q", got, sample)
+	}
+	if fi, err := os.Stat(newConfig); err != nil {
+		t.Fatal(err)
+	} else if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("new config mode = %o, want 600", perm)
+	}
+
+	// Second Load: reads from the new path, migrates nothing (old is gone).
+	c2, err := Load()
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if c2.GarminKey != "old-key" {
+		t.Fatalf("second Load did not read migrated config: %+v", c2)
+	}
+}
