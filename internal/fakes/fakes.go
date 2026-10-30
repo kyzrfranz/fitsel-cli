@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,12 @@ type FakeGarmin struct {
 	// 429 once, with a Retry-After header, so a client can exercise its
 	// rate-limit back-off path. Cleared after it fires once.
 	RateLimitOnce bool
+
+	// InvalidFitOnce makes the next download return a body that is not a ZIP
+	// and not a valid bare FIT (an HTML error page), so the client's FIT
+	// validation rejects it: a per-activity error, skipped, never uploaded.
+	// Cleared after it fires once.
+	InvalidFitOnce bool
 }
 
 // FakeActivity is one activity the fake Garmin serves.
@@ -84,6 +91,31 @@ func NewActivities() []FakeActivity {
 		{ID: 1002, Name: "Evening Ride", StartTimeGMT: "2026-10-25 18:30:00"},
 		{ID: 1003, Name: "Weekend Hike", StartTimeGMT: "2026-10-27 09:15:00"},
 	}
+}
+
+// syntheticFit builds a valid bare FIT file whose data section is the given
+// payload, so a test download is indistinguishable from a real one to the
+// client's FIT validation. It writes a 12-byte header (header size 12, an
+// arbitrary protocol/profile version, the data length, and the ".FIT"
+// signature) followed by the payload and a two-byte record CRC; the CRC is
+// not verified by the client, only the header layout and total length are.
+func syntheticFit(id int64) []byte {
+	payload := []byte(fmt.Sprintf("FIT-DATA-%d", id))
+	buf := make([]byte, 12+len(payload)+2)
+	buf[0] = 12                                                   // header size
+	buf[1] = 11                                                   // protocol version (arbitrary)
+	binary.LittleEndian.PutUint16(buf[2:4], 1)                    // profile version
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(payload))) // data size
+	copy(buf[8:12], ".FIT")
+	copy(buf[12:], payload)
+	// Two-byte record CRC: a simple checksum the client does not check but
+	// which keeps the file's length and layout well-formed.
+	crc := byte(0)
+	for _, b := range payload {
+		crc ^= b
+	}
+	binary.LittleEndian.PutUint16(buf[12+len(payload):], uint16(crc))
+	return buf
 }
 
 // ManyActivities returns n activities (id 1..n, newest first) all at or after
@@ -267,13 +299,25 @@ func (f *FakeGarmin) handleDownload(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(idStr, "%d", &id)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// InvalidFitOnce: return an HTML error page as the raw body — not a ZIP,
+	// not a valid bare FIT — so the client's FIT validation rejects it as a
+	// per-activity error, the same path a truncated real body would take.
+	if f.InvalidFitOnce {
+		f.InvalidFitOnce = false
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><body>500 Internal Server Error</body></html>")
+		return
+	}
 	for _, a := range f.activities {
 		if a.ID == id {
 			// Return a ZIP containing a single .fit, as the real API does.
+			// The fit is a synthetic valid FIT file (header + payload + a
+			// two-byte CRC), so the download is indistinguishable from a real
+			// one; the per-id payload keeps each upload's bytes unique.
 			zw := bufio.NewWriter(w)
 			z := zip.NewWriter(zw)
 			if ff, err := z.Create(a.Name + ".fit"); err == nil {
-				ff.Write([]byte("FIT-DATA-" + fmt.Sprint(id)))
+				ff.Write(syntheticFit(id))
 			}
 			z.Close()
 			zw.Flush()
@@ -324,6 +368,17 @@ func (f *FakeFitsel) Count(fit []byte) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.Counts[string(fit)]
+}
+
+// FITFor returns the exact bytes the fake serves as activity id's FIT file, so
+// tests can key uploads by the same bytes the download produces (a synthetic
+// valid FIT, not just the payload). id is the activity id as a string.
+func FITFor(id string) []byte {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return syntheticFit(0)
+	}
+	return syntheticFit(n)
 }
 
 // FailNextQueues the given statuses to be consumed one per upload, in order, so

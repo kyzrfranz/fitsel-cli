@@ -174,7 +174,7 @@ func TestResumeAfterInterruptedSync(t *testing.T) {
 	// Every activity uploaded exactly once — fitsel dedupes by content, so a
 	// resend would show a second upload of the same bytes.
 	for _, id := range []string{"1001", "1002", "1003"} {
-		if got := fits.Count([]byte("FIT-DATA-" + id)); got != 1 {
+		if got := fits.Count(fakes.FITFor(id)); got != 1 {
 			t.Fatalf("activity %s uploaded %d times; want exactly once", id, got)
 		}
 	}
@@ -540,7 +540,7 @@ func TestSyncPagesResumeAfterInterruptedUpload(t *testing.T) {
 
 	// Every activity uploaded exactly once — fitsel dedupes by content.
 	for id := int64(1); id <= n; id++ {
-		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(id, 10))); got != 1 {
+		if got := fits.Count(fakes.FITFor(strconv.FormatInt(id, 10))); got != 1 {
 			t.Fatalf("activity %d uploaded %d times; want exactly once", id, got)
 		}
 	}
@@ -685,10 +685,10 @@ func TestSkipAfterThresholdFailures(t *testing.T) {
 		t.Fatalf("run after skip: %v", err)
 	}
 	// Only 1002 and 1003 were ever uploaded; 1001 stayed skipped.
-	if got := fits.Count([]byte("FIT-DATA-1002")) + fits.Count([]byte("FIT-DATA-1003")); got != 2 {
+	if got := fits.Count(fakes.FITFor("1002")) + fits.Count(fakes.FITFor("1003")); got != 2 {
 		t.Fatalf("uploads = %d, want 2 (1002 and 1003; 1001 skipped)", got)
 	}
-	if c := fits.Count([]byte("FIT-DATA-1001")); c != 0 {
+	if c := fits.Count(fakes.FITFor("1001")); c != 0 {
 		t.Fatalf("skipped activity 1001 was uploaded %d times; want 0", c)
 	}
 }
@@ -1231,7 +1231,7 @@ func TestRunWithEndToEndCutsAbove(t *testing.T) {
 	}
 	// Every uploaded id must be on or before --to: none past Nov 10.
 	for i := int64(11); i <= n; i++ {
-		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(i, 10))); got != 0 {
+		if got := fits.Count(fakes.FITFor(strconv.FormatInt(i, 10))); got != 0 {
 			t.Fatalf("activity %d (after --to) was uploaded %d times; want 0", i, got)
 		}
 	}
@@ -1262,7 +1262,7 @@ func TestRunWithEndToEndPaginationNeverTruncated(t *testing.T) {
 	}
 	// Every activity uploaded exactly once.
 	for i := int64(1); i <= n; i++ {
-		if got := fits.Count([]byte("FIT-DATA-" + strconv.FormatInt(i, 10))); got != 1 {
+		if got := fits.Count(fakes.FITFor(strconv.FormatInt(i, 10))); got != 1 {
 			t.Fatalf("activity %d uploaded %d times; want exactly once", i, got)
 		}
 	}
@@ -1368,6 +1368,115 @@ func TestOneFailedActivityUploadsTheRest(t *testing.T) {
 	}
 	if got := len(fits.Uploadees); got != 3 {
 		t.Fatalf("rerun uploaded %d total, want 3 (the pending one finished)", got)
+	}
+}
+
+// TestInvalidFitDownloadIsPerActivityError proves an activity whose download
+// returns a body that is not a ZIP and not a valid bare FIT (an HTML error
+// page) is a per-activity error: it is skipped, never uploaded to fitsel, and
+// the other activities still upload. This is the path a truncated or
+// malformed Garmin body takes.
+func TestInvalidFitDownloadIsPerActivityError(t *testing.T) {
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	// The first download (activity 1001) returns an HTML body: not a ZIP, not
+	// a valid bare FIT, so unzipFit rejects it with errInvalidFit.
+	gar.InvalidFitOnce = true
+
+	err := run(newRunArgs(t, dir, gar, fits))
+	if err == nil {
+		t.Fatal("expected a partial-failure error when an activity is not a valid FIT")
+	}
+	if got := mapExitCode(err); got != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d (partial failure)", got, exitPartialFailure)
+	}
+	// The other two activities uploaded; the invalid one did not.
+	if len(fits.Uploadees) != 2 {
+		t.Fatalf("uploaded %d activities, want 2 (the two valid ones)", len(fits.Uploadees))
+	}
+	if c := fits.Count(fakes.FITFor("1001")); c != 0 {
+		t.Fatalf("invalid activity 1001 was uploaded %d times; want 0", c)
+	}
+	// The valid ones were uploaded once each, keyed by the exact served bytes.
+	if c := fits.Count(fakes.FITFor("1002")); c != 1 {
+		t.Fatalf("activity 1002 uploaded %d times; want 1", c)
+	}
+	if c := fits.Count(fakes.FITFor("1003")); c != 1 {
+		t.Fatalf("activity 1003 uploaded %d times; want 1", c)
+	}
+	// The invalid activity is left pending for a later run.
+	st, err := state.Load(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if st.Done("1001") {
+		t.Fatal("invalid activity 1001 should not be marked synced")
+	}
+}
+
+// TestInvalidFitCountsTowardSkip proves the invalid-FIT download failure counts
+// toward the skip/continue threshold: after SkipThreshold runs it fails, the
+// activity is marked skipped (not retried), and the other activities still
+// upload. This is the "one bad activity must not block every later sync"
+// behaviour from #101.
+func TestInvalidFitCountsTowardSkip(t *testing.T) {
+	const threshold = 3
+	dir := t.TempDir()
+	gar := fakes.NewFakeGarmin("test-garmin-key", fakes.NewActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	statePath := filepath.Join(dir, "state.json")
+	// Point the clients at the fakes (newRunArgs does this; set it here for the
+	// custom args below).
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+	t.Cleanup(func() {
+		garminBaseURL = garmin.BaseURL
+		fitselBaseURL = "https://ingest.fitsel.app/ingest/wh"
+	})
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// Each run: the first download returns an HTML body (invalid FIT) once,
+	// then recovers for the rest of that run. The invalid activity 1001 fails
+	// every run and must count toward the skip threshold.
+	for attempt := 1; attempt <= threshold; attempt++ {
+		gar.InvalidFitOnce = true
+		fits.FailNextQueued() // uploads succeed for the valid activities
+		err := run([]string{"-since", "2026-10-01", "-state", statePath,
+			"-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token",
+			"-skip-threshold", "3"})
+		if attempt < threshold && err == nil {
+			t.Fatalf("run %d: expected a partial-failure error", attempt)
+		}
+		st, err := state.Load(statePath)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if attempt < threshold && st.Skipped("1001") {
+			t.Fatalf("run %d: 1001 should not be skipped before the threshold", attempt)
+		}
+	}
+
+	// After the third failure the invalid activity is skipped.
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !st.Skipped("1001") {
+		t.Fatal("invalid activity 1001 should be skipped after the threshold")
+	}
+	// The valid activities uploaded once each across the runs.
+	if c := fits.Count(fakes.FITFor("1002")); c != 1 {
+		t.Fatalf("activity 1002 uploaded %d times; want 1", c)
+	}
+	if c := fits.Count(fakes.FITFor("1003")); c != 1 {
+		t.Fatalf("activity 1003 uploaded %d times; want 1", c)
 	}
 }
 
@@ -2486,7 +2595,7 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		if len(fits.Uploadees) != 1 {
 			t.Fatalf("run 2 uploaded %d; want only the 1 new activity", len(fits.Uploadees))
 		}
-		if got := fits.Count([]byte("FIT-DATA-1004")); got != 1 {
+		if got := fits.Count(fakes.FITFor("1004")); got != 1 {
 			t.Fatalf("1004 uploaded %d times; want once", got)
 		}
 		if len(gar.StartDatesSeen) != 1 {
@@ -2536,7 +2645,7 @@ func TestIncrementalResumesFromStoredPoint(t *testing.T) {
 		if len(fits.Uploadees) != 1 {
 			t.Fatalf("run 3 uploaded %d; want only the 1 new activity", len(fits.Uploadees))
 		}
-		if got := fits.Count([]byte("FIT-DATA-1005")); got != 1 {
+		if got := fits.Count(fakes.FITFor("1005")); got != 1 {
 			t.Fatalf("1005 uploaded %d times; want once", got)
 		}
 		gar.Close()
