@@ -2296,3 +2296,104 @@ func TestGarminRateLimitClientBailsEarly(t *testing.T) {
 		t.Fatalf("back-off took %v; it should have bailed early on cancel, not waited the full Retry-After", elapsed)
 	}
 }
+
+// TestUpdateCheckNewerVersionPrintsHint proves the wiring end to end: when a
+// newer release exists, main prints the one-line upgrade hint (URL then brew)
+// to stdout. The check points at a fake GitHub via the injectable base and a
+// pinned dev version bump; the hint is read from captured stdout.
+func TestUpdateCheckNewerVersionPrintsHint(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	// Point the checker's GitHub base at a fake that reports a newer release,
+	// and set the built-in version the checker compares against.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","html_url":"https://example.com/releases/v9.9.9"}`))
+	}))
+	defer srv.Close()
+	githubBaseURL = srv.URL
+	prevVersion := version
+	version = "1.0.0"
+	t.Cleanup(func() { version = prevVersion })
+
+	// Point the checker's throttle state at a fresh temp dir so this is a first
+	// run (no prior timestamp to throttle against).
+	t.Setenv("FITSEL_STATE", dir)
+
+	// Capture stdout for the run; the hint prints alongside the sync summary.
+	orig := os.Stdout
+	r_, w_, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w_
+	defer func() { os.Stdout = orig }()
+
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	w_.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, r_)
+	r_.Close()
+
+	out := buf.String()
+	if !strings.Contains(out, "https://example.com/releases/v9.9.9") {
+		t.Fatalf("hint missing the release URL; got:\n%s", out)
+	}
+	if !strings.Contains(out, "brew upgrade fitsel-client") {
+		t.Fatalf("hint missing the brew command; got:\n%s", out)
+	}
+}
+
+// TestUpdateCheckOptedOutMakesNoRequest proves the opt-out (FITSEL_NO_UPDATE_CHECK=1
+// or --no-update-check) suppresses the check entirely: no request reaches the
+// fake GitHub. The fake counts requests; the opt-out must leave it at zero.
+func TestUpdateCheckOptedOutMakesNoRequest(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	gar := fakes.NewFakeGarmin("test-garmin-key", newActivities())
+	defer gar.Close()
+	fits := fakes.NewFakeFitsel("test-passkey")
+	defer fits.Close()
+	garminBaseURL = gar.URL()
+	fitselBaseURL = fits.URL()
+
+	t.Setenv("GARMIN_API_KEY", "test-garmin-key")
+	t.Setenv("FITSEL_TOKEN", "test-fitsel-token")
+	t.Setenv("FITSEL_PASSKEY", "test-passkey")
+
+	var requests int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","html_url":"https://example.com/releases/v9.9.9"}`))
+	}))
+	defer srv.Close()
+	githubBaseURL = srv.URL
+	prevVersion := version
+	version = "1.0.0"
+	t.Cleanup(func() { version = prevVersion })
+
+	// Opt out via the env var.
+	t.Setenv("FITSEL_NO_UPDATE_CHECK", "1")
+	args := []string{"-since", "2026-10-01", "-state", statePath, "-fitsel-endpoint", fits.URL() + "/ingest/wh/test-token"}
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := atomic.LoadInt64(&requests); got != 0 {
+		t.Fatalf("opted-out run made %d requests; want 0", got)
+	}
+}

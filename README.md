@@ -193,6 +193,28 @@ safe to run anywhere. `status --pending` is the only mode that touches the
 network, and it mirrors `--dry-run`: it lists what a sync would upload, uploads
 nothing, and leaves the state file unchanged.
 
+### Update check
+
+Each run checks, at most once per day, whether a newer version of the tool
+exists. It reads the last check time from the state dir and skips if a check
+already ran within the last 24 hours, so it makes **at most one request a day**.
+The request is a single `GET` to GitHub's latest release and is **silent on
+every failure** — if GitHub is slow or unreachable, the check makes no output and
+never blocks your sync.
+
+When a newer version exists, it prints one line to stdout:
+
+```
+Update available — https://github.com/kyzrfranz/fitsel-cli/releases/tag/v1.2.0 — run "brew upgrade fitsel-client"
+```
+
+If you are on the latest version, or the check fails, it prints nothing. To turn
+it off, pass `--no-update-check` or set `FITSEL_NO_UPDATE_CHECK=1`. A dev build
+(one built from source, with a `-dev` version) skips the check entirely.
+
+This is the third of the tool's outside calls: it joins the Garmin activity fetch
+and the fitsel upload. Unlike those, it is best-effort and never stops a sync.
+
 ### Optional flags
 
 - `--since <YYYY-MM-DD>` — only sync activities on or after this date. The first
@@ -213,6 +235,8 @@ nothing, and leaves the state file unchanged.
 - `--unskip` — retry activities that were skipped for failing too many times.
   Clears the skip and exits without a sync run, so you can confirm the problem is
   fixed first.
+- `--no-update-check` — skip the daily update check (see below). Or set the
+  environment variable `FITSEL_NO_UPDATE_CHECK=1` to opt out without a flag.
 
 ### Activities that keep failing
 

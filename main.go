@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kyzrfranz/fitsel-cli/internal/checker"
 	"github.com/kyzrfranz/fitsel-cli/internal/config"
 	"github.com/kyzrfranz/fitsel-cli/internal/fitsel"
 	"github.com/kyzrfranz/fitsel-cli/internal/garmin"
@@ -65,7 +66,15 @@ var (
 )
 
 // version is set at release time by GoReleaser via -ldflags "-X main.version=...".
-var version = "dev"
+// The default carries a "-dev" suffix so a local build (go run .) is recognised
+// as a dev build and skips the update check (see internal/checker); a release
+// overrides it with a plain semver like "1.2.0".
+var version = "0.0.0-dev"
+
+// githubBaseURL overrides the GitHub API base the update checker queries. It is
+// empty in production (the checker uses the real GitHub); tests point it at an
+// httptest fake so the check makes no real network call.
+var githubBaseURL = ""
 
 // errPartialFailure wraps the run when at least one activity failed to sync but
 // the run finished: it carries the count so main can print a one-line summary
@@ -187,6 +196,7 @@ func runWithCtx(ctx context.Context, args []string) error {
 	// toward (per #132). Zero disables the skip entirely.
 	skipThreshold := fs.Int("skip-threshold", 3, "mark an activity skipped after this many sync failures (0 to disable)")
 	unskip := fs.Bool("unskip", false, "clear the skip on every activity so they are retried, then exit")
+	noUpdateCheck := fs.Bool("no-update-check", false, "skip the daily update check (or set FITSEL_NO_UPDATE_CHECK=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -211,6 +221,12 @@ func runWithCtx(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading state: %w", err)
 	}
+	// Best-effort daily update check: prints a one-line upgrade hint when a
+	// newer version exists. It is silent on every failure and throttled to once
+	// per day, so a slow or unreachable GitHub can never block the sync. It is
+	// skipped for a dev build or when the athlete opts out.
+	runUpdateCheck(*noUpdateCheck)
+
 	// A run carries the skip policy; the state defaults it to 3, and the flag
 	// overrides it. The flag is read with fs.Visit (not its default value) so
 	// 0 is honoured as "disable" rather than falling back to the default: the
@@ -296,6 +312,29 @@ func runWithCtx(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("done: %d synced, %d failed this run\n", synced, failed)
 	return nil
+}
+
+// runUpdateCheck performs the best-effort daily update check and prints a
+// one-line upgrade hint to stdout when a newer version exists. It is silent on
+// every failure (connection error, timeout, non-2xx, malformed body) and on the
+// skip paths (dev build, throttled, or opted out), so it can never block the
+// sync. The opt-out is the --no-update-check flag or FITSEL_NO_UPDATE_CHECK=1.
+func runUpdateCheck(flagDisabled bool) {
+	if flagDisabled || os.Getenv("FITSEL_NO_UPDATE_CHECK") == "1" {
+		return
+	}
+	checker.SetVersion(version)
+	if githubBaseURL != "" {
+		checker.Base = githubBaseURL
+	}
+	hint, err := checker.Run(checker.Options{})
+	if err != nil {
+		return // skipped (dev build, throttled, opted out) or failed: stay silent.
+	}
+	if hint == nil {
+		return // up to date or older: nothing to say.
+	}
+	fmt.Println(hint.Text)
 }
 
 // syncActivities downloads and uploads every pending activity in order, marking
