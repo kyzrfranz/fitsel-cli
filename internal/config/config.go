@@ -82,13 +82,14 @@ func configPath() string {
 // location, so the tool reads the credentials it was already given after the
 // directory was renamed. It runs once, the first time Load is called with no
 // $FITSEL_CONFIG set, on a machine that still has the old file and not yet the
-// new one. It reads the old file, writes it to the new path at 0600, and
-// removes the old file. It does nothing (and prints nothing) if either file is
-// absent, the paths are overridden by $FITSEL_CONFIG, or the move has already
-// happened: the new file's presence is what stops a repeat.
+// new one. It atomically renames the old file to the new path at 0600, so the
+// old path is gone the moment the new one exists. It does nothing (and prints
+// nothing) if either file is absent, the paths are overridden by $FITSEL_CONFIG,
+// or the move has already happened: the new file's presence is what stops a
+// repeat.
 //
 // The old file is trusted as-is — it holds the athlete's own credentials they
-// already wrote here — so its contents are copied unchanged, not validated.
+// already wrote here — so its contents are moved unchanged, not validated.
 func migrateConfig() {
 	// The migration is a home-dir-default concern only: a caller who sets
 	// $FITSEL_CONFIG has taken explicit control of the path and must not have
@@ -114,14 +115,16 @@ func migrateConfig() {
 		return
 	}
 
-	// Copy the old file to the new path first (at the hygiene the new default
-	// uses), then remove the old one, so a crash between the two never loses
-	// the credentials: the new copy survives and the old still reads.
+	// Move the old file to the new path in one atomic rename (at the hygiene
+	// the new default uses), rather than copy-then-remove: a rename either
+	// lands or it does not, so a crash or interrupted run can never leave the
+	// credentials stranded — the old path is gone the moment the new one
+	// exists.
 	if err := os.MkdirAll(filepath.Dir(newPath), 0o700); err != nil {
 		return
 	}
 	if err := os.Rename(oldPath, newPath); err != nil {
-		// The copy failed or the old file vanished mid-read: leave the old
+		// The rename failed (or the old file vanished mid-move): leave the old
 		// file in place so it can be tried again next run, rather than
 		// destroying credentials over a transient failure.
 		return

@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,5 +247,45 @@ func TestMigratesOldConfigDir(t *testing.T) {
 	}
 	if c2.GarminKey != "old-key" {
 		t.Fatalf("second Load did not read migrated config: %+v", c2)
+	}
+}
+
+// TestMigratesOldConfigDirPrintsNotice covers the acceptance criterion that a
+// one-line notice prints when the migration runs. It pins os.Stderr around the
+// first Load, which is when the old ~/.config/garmin-sync config is moved, and
+// asserts the printed line names both paths. A user-visible notice with no test
+// is a path no test walks, so this pins the exact output rather than leaving
+// it to a manual run.
+func TestMigratesOldConfigDirPrintsNotice(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("FITSEL_CONFIG", "") // use the home-dir default, not $FITSEL_CONFIG
+
+	oldConfig := filepath.Join(dir, ".config", "garmin-sync", "config.json")
+	if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sample = `{"garmin_api_key":"old-key","fitsel_token":"old-token","fitsel_passkey":"old-passkey"}`
+	if err := os.WriteFile(oldConfig, []byte(sample), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin stderr and drive the first Load, which performs the migration.
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	r.Close()
+
+	if !strings.Contains(buf.String(), oldConfig) || !strings.Contains(buf.String(), ".config/fitsel-client/config.json") {
+		t.Fatalf("migration notice did not name both paths, got %q", buf.String())
 	}
 }
